@@ -1,4 +1,3 @@
-import os
 #!/usr/bin/env python3
 """
 Kalshi AutoTrader - Unified Edition
@@ -181,8 +180,8 @@ CRYPTO_SERIES_TICKERS = [
 ]
 
 # ── Crypto volatility defaults (v2 calibrated) ──
-BTC_HOURLY_VOL = 0.006   # ~0.6% hourly std dev (was 0.3%, too low per Grok: actual ~0.5-0.7%)
-ETH_HOURLY_VOL = 0.007   # ~0.7% hourly std dev (was 0.4%, ETH slightly more volatile)
+BTC_HOURLY_VOL = 0.0096  # ~0.96% hourly std dev (Grok review: actual avg from Babypips data)
+ETH_HOURLY_VOL = 0.0118  # ~1.18% hourly std dev (Grok review: actual avg, more volatile than BTC)
 CRYPTO_FAT_TAIL_MULTIPLIER = 1.0  # Disabled after v2 disaster analysis
 
 # ── Logging paths ──
@@ -1642,7 +1641,7 @@ def _heuristic_crypto(market: MarketInfo, context: dict = None) -> tuple:
 
     # Calibration scaling (Grok rec: predicted 71.5% → actual 46.2%, ratio ~0.65)
     # Shrink probabilities toward 50% to reduce overconfidence
-    CALIBRATION_FACTOR = 0.65
+    CALIBRATION_FACTOR = 0.75  # Grok review: 0.65 too conservative, optimal 0.70-0.80
     prob_above = 0.5 + (prob_above - 0.5) * CALIBRATION_FACTOR
     prob_above = max(0.05, min(0.95, prob_above))
 
@@ -2339,6 +2338,10 @@ def save_paper_state(state: dict):
     dd = peak - bal
     if dd > stats.get("max_drawdown_cents", 0):
         stats["max_drawdown_cents"] = dd
+    # Also track percentage drawdown (Grok review bug #4)
+    dd_pct = (dd / peak * 100) if peak > 0 else 0
+    if dd_pct > stats.get("max_drawdown_pct", 0):
+        stats["max_drawdown_pct"] = round(dd_pct, 2)
 
     with open(PAPER_STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
@@ -2347,7 +2350,18 @@ def save_paper_state(state: dict):
 def paper_trade_open(state: dict, ticker: str, action: str, price_cents: int, contracts: int,
                      title: str = "", edge: float = 0.0, expiry: str = ""):
     """Record a new paper trade: deduct cost from bankroll, add to positions."""
+    # Check max positions limit (Grok review bug #3)
+    open_positions = [p for p in state.get("positions", []) if p.get("status") == "open"]
+    if len(open_positions) >= MAX_POSITIONS:
+        print(f"  ⚠️ Max positions ({MAX_POSITIONS}) reached, skipping {ticker}")
+        return
+    
     cost = contracts * price_cents
+    # Don't allow negative balance (Grok review: overbetting fix)
+    if state["current_balance_cents"] - cost < 0:
+        print(f"  ⚠️ Insufficient balance for {ticker} (need {cost}c, have {state['current_balance_cents']}c)")
+        return
+    
     state["current_balance_cents"] -= cost
 
     position = {
@@ -2416,10 +2430,10 @@ def paper_trade_settle(state: dict, ticker: str, won: bool):
                     break
 
             settled = True
-            break
+            # Don't break — settle ALL matching positions for this ticker
 
     if settled:
-        # Remove settled position from active positions
+        # Remove settled positions from active positions
         state["positions"] = [p for p in state["positions"] if not (p.get("ticker") == ticker and p.get("status") != "open")]
         save_paper_state(state)
 
