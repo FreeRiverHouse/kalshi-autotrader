@@ -46,6 +46,15 @@ import requests
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
+# SQLite DB layer (zero extra deps — uses stdlib sqlite3)
+try:
+    import db as _db
+    _db.init_db()
+    _DB_AVAILABLE = True
+except Exception as _db_err:
+    print(f"⚠️  SQLite DB unavailable: {_db_err}")
+    _DB_AVAILABLE = False
+
 # ============================================================================
 # OPTIONAL MODULE IMPORTS (from v2 ecosystem)
 # ============================================================================
@@ -2420,6 +2429,19 @@ def update_trade_results():
                             entry["settled_at"] = datetime.now(timezone.utc).isoformat()
                             entry["market_result"] = market_result
                             updated_count += 1
+                            # SQLite settlement
+                            if _DB_AVAILABLE:
+                                try:
+                                    contracts   = entry.get("contracts", 0)
+                                    price_cents = entry.get("price_cents", 50)
+                                    if entry["result_status"] == "won":
+                                        pnl_c = contracts * (100 - price_cents)
+                                    else:
+                                        pnl_c = -(contracts * price_cents)
+                                    entry["pnl_cents"] = pnl_c
+                                    _db.upsert_trade_by_ticker_ts(entry)
+                                except Exception:
+                                    pass
                     time.sleep(0.2)  # Rate limit
                 updated_lines.append(json.dumps(entry) + "\n")
             except Exception:
@@ -2656,12 +2678,24 @@ def log_trade(market: MarketInfo, decision: TradeDecision, order_result: dict, d
         with open(log_path, "a") as f:
             f.write(json.dumps(entry) + "\n")
 
+    # SQLite
+    if _DB_AVAILABLE and entry.get("action") in ("BUY_YES", "BUY_NO"):
+        try:
+            _db.upsert_trade_by_ticker_ts(entry)
+        except Exception as _e:
+            print(f"⚠️  DB insert_trade error: {_e}")
+
 
 def log_cycle(stats: dict):
     CYCLE_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     entry = {"timestamp": datetime.now(timezone.utc).isoformat(), **stats}
     with open(CYCLE_LOG_FILE, "a") as f:
         f.write(json.dumps(entry) + "\n")
+    if _DB_AVAILABLE:
+        try:
+            _db.insert_cycle(entry)
+        except Exception:
+            pass
 
 
 def log_skip(ticker: str, reason: str, details: dict = None):

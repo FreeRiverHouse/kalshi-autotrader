@@ -1,57 +1,31 @@
 #!/usr/bin/env python3
 """
 Kalshi AutoTrader Dashboard — port 8888
-Real-time paper trading monitor with charts and API for feedback loop.
+Real-time paper trading monitor backed by SQLite.
 """
 
 import json
-import os
 import re
-import time
-from datetime import datetime, timezone, timedelta
+import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
-from collections import defaultdict
 from flask import Flask, jsonify, render_template_string
+
+import db as _db
 
 app = Flask(__name__)
 
-DATA_DIR = Path(__file__).parent / "data" / "trading"
-TRADE_LOG   = DATA_DIR / "kalshi-unified-trades.jsonl"
-CYCLE_LOG   = DATA_DIR / "kalshi-unified-cycles.jsonl"
+DATA_DIR    = Path(__file__).parent / "data" / "trading"
 PAPER_STATE = DATA_DIR / "paper-trade-state.json"
 AUTOTRADER  = Path(__file__).parent / "kalshi-autotrader.py"
 
-# ── Data loading ──────────────────────────────────────────────────────────────
+# Ensure DB and schema exist at startup
+_db.init_db()
 
-def load_trades():
-    trades = []
-    if not TRADE_LOG.exists():
-        return trades
-    for line in TRADE_LOG.read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            trades.append(json.loads(line))
-        except Exception:
-            pass
-    return trades
 
-def load_cycles():
-    cycles = []
-    if not CYCLE_LOG.exists():
-        return cycles
-    for line in CYCLE_LOG.read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            cycles.append(json.loads(line))
-        except Exception:
-            pass
-    return cycles
+# ── Helpers ────────────────────────────────────────────────────────────────────
 
-def load_paper_state():
+def load_paper_state() -> dict:
     if PAPER_STATE.exists():
         try:
             return json.loads(PAPER_STATE.read_text())
@@ -59,171 +33,14 @@ def load_paper_state():
             pass
     return {}
 
-def trader_pid():
-    import subprocess
+
+def trader_pid() -> int | None:
     r = subprocess.run(["pgrep", "-f", "kalshi-autotrader"], capture_output=True, text=True)
     pids = r.stdout.strip().split()
     return int(pids[0]) if pids else None
 
-# ── Metrics computation ───────────────────────────────────────────────────────
 
-def compute_metrics():
-    trades = load_trades()
-    state  = load_paper_state()
-
-    buys = [t for t in trades if t.get("action") in ("BUY_YES", "BUY_NO")]
-    settled = [t for t in buys if t.get("result_status") in ("won", "lost")]
-    won = [t for t in settled if t.get("result_status") == "won"]
-    lost = [t for t in settled if t.get("result_status") == "lost"]
-    pending = [t for t in buys if t.get("result_status") not in ("won", "lost")]
-
-    total_cost = sum(t.get("cost_cents", 0) for t in settled)
-    gross_profit = sum(
-        t.get("contracts", 0) * (100 - t.get("price_cents", 50))
-        for t in won
-    )
-    gross_loss = sum(t.get("cost_cents", 0) for t in lost)
-    net_pnl = gross_profit - gross_loss
-    roi_pct = (net_pnl / total_cost * 100) if total_cost > 0 else 0
-
-    buy_yes = [t for t in settled if t.get("action") == "BUY_YES"]
-    buy_no  = [t for t in settled if t.get("action") == "BUY_NO"]
-    yes_wr  = len([t for t in buy_yes if t["result_status"] == "won"]) / len(buy_yes) * 100 if buy_yes else 0
-    no_wr   = len([t for t in buy_no  if t["result_status"] == "won"]) / len(buy_no)  * 100 if buy_no  else 0
-
-    # By category
-    by_cat = defaultdict(lambda: {"trades": 0, "won": 0, "pnl": 0})
-    for t in settled:
-        cat = t.get("category") or _infer_category(t.get("ticker", ""))
-        by_cat[cat]["trades"] += 1
-        if t["result_status"] == "won":
-            by_cat[cat]["won"] += 1
-            by_cat[cat]["pnl"] += t.get("contracts", 0) * (100 - t.get("price_cents", 50))
-        else:
-            by_cat[cat]["pnl"] -= t.get("cost_cents", 0)
-
-    # Bankroll timeline from paper state trade_history
-    history = state.get("trade_history", [])
-    starting = state.get("starting_balance_cents", 10000)
-    bankroll_series = []
-    running = starting
-    for h in sorted(history, key=lambda x: x.get("settled_at", x.get("opened_at", ""))):
-        running += h.get("pnl_cents", 0)
-        bankroll_series.append({
-            "t": h.get("settled_at") or h.get("opened_at"),
-            "v": running / 100
-        })
-
-    # If no history in state, rebuild from trades log
-    if not bankroll_series and settled:
-        running = starting / 100
-        for t in sorted(settled, key=lambda x: x.get("settled_at") or x.get("timestamp")):
-            if t["result_status"] == "won":
-                pnl = t.get("contracts", 0) * (100 - t.get("price_cents", 50)) / 100
-            else:
-                pnl = -t.get("cost_cents", 0) / 100
-            running += pnl
-            bankroll_series.append({
-                "t": t.get("settled_at") or t.get("timestamp"),
-                "v": round(running, 2)
-            })
-
-    current_balance = state.get("current_balance_cents", starting) / 100
-
-    return {
-        "total_trades": len(buys),
-        "settled": len(settled),
-        "pending": len(pending),
-        "won": len(won),
-        "lost": len(lost),
-        "win_rate": round(len(won) / len(settled) * 100, 1) if settled else 0,
-        "yes_win_rate": round(yes_wr, 1),
-        "no_win_rate": round(no_wr, 1),
-        "yes_trades": len(buy_yes),
-        "no_trades": len(buy_no),
-        "roi_pct": round(roi_pct, 2),
-        "net_pnl_usd": round(net_pnl / 100, 2),
-        "gross_profit_usd": round(gross_profit / 100, 2),
-        "gross_loss_usd": round(gross_loss / 100, 2),
-        "current_balance_usd": round(current_balance, 2),
-        "starting_balance_usd": round(starting / 100, 2),
-        "bankroll_series": bankroll_series,
-        "by_category": dict(by_cat),
-        "avg_edge": round(sum(t.get("edge", 0) for t in settled) / len(settled) * 100, 2) if settled else 0,
-        "trader_running": trader_pid() is not None,
-        "trader_pid": trader_pid(),
-        "last_updated": datetime.now(timezone.utc).isoformat(),
-    }
-
-def _infer_category(ticker):
-    t = ticker.upper()
-    if any(x in t for x in ("BTC", "ETH", "SOL", "CRYPTO")):
-        return "crypto"
-    if any(x in t for x in ("NBA", "NFL", "MLB", "NHL", "NCAA", "SOCCER", "CBB")):
-        return "sports"
-    if any(x in t for x in ("WEATHER", "TEMP", "SNOW", "RAIN")):
-        return "weather"
-    return "other"
-
-def get_recent_trades(limit=50):
-    trades = load_trades()
-    buys = [t for t in trades if t.get("action") in ("BUY_YES", "BUY_NO")]
-    buys.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
-    result = []
-    for t in buys[:limit]:
-        status = t.get("result_status", "pending")
-        price  = t.get("price_cents", 0)
-        contr  = t.get("contracts", 0)
-        if status == "won":
-            pnl = contr * (100 - price) / 100
-        elif status == "lost":
-            pnl = -t.get("cost_cents", 0) / 100
-        else:
-            pnl = None
-        result.append({
-            "ts":        t.get("timestamp", "")[:19].replace("T", " "),
-            "ticker":    t.get("ticker", ""),
-            "title":     (t.get("title") or t.get("ticker", ""))[:60],
-            "action":    t.get("action", ""),
-            "price":     price,
-            "contracts": contr,
-            "cost_usd":  round(t.get("cost_cents", 0) / 100, 2),
-            "edge":      round(t.get("edge", 0) * 100, 1),
-            "status":    status,
-            "pnl_usd":   round(pnl, 2) if pnl is not None else None,
-            "settled_at": (t.get("settled_at") or "")[:19].replace("T", " "),
-            "category":  t.get("category") or _infer_category(t.get("ticker", "")),
-            "forecast":  round(t.get("forecast_prob", 0) * 100, 1),
-        })
-    return result
-
-def get_roi_series():
-    """ROI% cumulative over time for chart."""
-    trades = load_trades()
-    settled = [t for t in trades if t.get("action") in ("BUY_YES","BUY_NO")
-               and t.get("result_status") in ("won","lost")]
-    settled.sort(key=lambda x: x.get("settled_at") or x.get("timestamp"))
-    total_cost = 0
-    total_pnl  = 0
-    series = []
-    for i, t in enumerate(settled):
-        cost = t.get("cost_cents", 0)
-        total_cost += cost
-        if t["result_status"] == "won":
-            pnl = t.get("contracts", 0) * (100 - t.get("price_cents", 50))
-        else:
-            pnl = -cost
-        total_pnl += pnl
-        roi = (total_pnl / total_cost * 100) if total_cost > 0 else 0
-        series.append({
-            "t": (t.get("settled_at") or t.get("timestamp", ""))[:19].replace("T"," "),
-            "v": round(roi, 2),
-            "n": i + 1,
-        })
-    return series
-
-def get_config_params():
-    """Read key params from kalshi-autotrader.py for display."""
+def get_config_params() -> dict:
     params = {}
     if not AUTOTRADER.exists():
         return params
@@ -235,6 +52,77 @@ def get_config_params():
         if m:
             params[key] = m.group(1)
     return params
+
+
+# ── Metrics ────────────────────────────────────────────────────────────────────
+
+def compute_metrics() -> dict:
+    m     = _db.get_metrics()
+    state = load_paper_state()
+
+    starting_cents = state.get("starting_balance_cents", 10000)
+    current_cents  = state.get("current_balance_cents", starting_cents)
+
+    # Build bankroll series from SQLite cumulative PnL
+    bk_raw  = m.get("bankroll_series_raw", [])
+    bk_base = starting_cents / 100
+    bankroll_series = [
+        {"t": t[:19].replace("T", " ") if t else "", "v": round(bk_base + cum_pnl / 100, 2)}
+        for t, cum_pnl in bk_raw
+    ]
+
+    pid = trader_pid()
+    return {
+        "total_trades":       m["total_trades"],
+        "settled":            m["settled"],
+        "pending":            m["pending"],
+        "won":                m["won"],
+        "lost":               m["lost"],
+        "win_rate":           m["win_rate"],
+        "yes_win_rate":       m["yes_win_rate"],
+        "no_win_rate":        m["no_win_rate"],
+        "yes_trades":         m["yes_trades"],
+        "no_trades":          m["no_trades"],
+        "roi_pct":            m["roi_pct"],
+        "net_pnl_usd":        round(m["net_pnl_cents"] / 100, 2),
+        "gross_profit_usd":   round(m["gross_profit_cents"] / 100, 2),
+        "gross_loss_usd":     round(m["gross_loss_cents"] / 100, 2),
+        "current_balance_usd":  round(current_cents / 100, 2),
+        "starting_balance_usd": round(starting_cents / 100, 2),
+        "bankroll_series":    bankroll_series,
+        "by_category":        m["by_category"],
+        "avg_edge":           m["avg_edge"],
+        "trader_running":     pid is not None,
+        "trader_pid":         pid,
+        "last_updated":       datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def get_recent_trades(limit: int = 100) -> list:
+    rows = _db.get_trades(limit=limit)
+    result = []
+    for t in rows:
+        status = t.get("result_status", "pending")
+        price  = t.get("price_cents", 0)
+        contr  = t.get("contracts", 0)
+        pnl_c  = t.get("pnl_cents")
+        pnl    = round(pnl_c / 100, 2) if pnl_c is not None else None
+        result.append({
+            "ts":        (t.get("timestamp") or "")[:19].replace("T", " "),
+            "ticker":    t.get("ticker", ""),
+            "title":     (t.get("title") or t.get("ticker", ""))[:60],
+            "action":    t.get("action", ""),
+            "price":     price,
+            "contracts": contr,
+            "cost_usd":  round(t.get("cost_cents", 0) / 100, 2),
+            "edge":      round((t.get("edge") or 0) * 100, 1),
+            "status":    status,
+            "pnl_usd":   pnl,
+            "settled_at": (t.get("settled_at") or "")[:19].replace("T", " "),
+            "category":  t.get("category") or "other",
+            "forecast":  round((t.get("forecast_prob") or 0) * 100, 1),
+        })
+    return result
 
 # ── API endpoints ──────────────────────────────────────────────────────────────
 
@@ -248,7 +136,7 @@ def api_trades():
 
 @app.route("/api/roi_series")
 def api_roi_series():
-    return jsonify(get_roi_series())
+    return jsonify(_db.get_roi_series())
 
 @app.route("/api/status")
 def api_status():
