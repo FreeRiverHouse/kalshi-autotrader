@@ -1,0 +1,40 @@
+# Credenziali - MAI in git
+*.pem
+.env.kalshi
+.env.local
+.env
+
+# Log
+*.log
+
+# Dati trade storici
+*.jsonl
+
+# State files runtime (locali, non condivisi)
+kalshi-health-state.json
+kalshi-regime-state.json
+kalshi-momentum-regime-state.json
+kalshi-momentum-state.json
+kalshi-latency-profile.json
+kalshi-pnl-alert-state.json
+kalshi-dryrun-balance.json
+kalshi-settlements.json
+kalshi-streak-records.json
+crypto-news-cache.json
+
+# Alert state
+*.alert
+
+# Data dir
+data/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# macOS
+.DS_Store
