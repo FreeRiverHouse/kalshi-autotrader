@@ -97,8 +97,17 @@ except Exception:
 # CONFIGURATION
 # ============================================================================
 
-API_KEY_ID = os.getenv("KALSHI_API_KEY_ID", "")
-PRIVATE_KEY = os.getenv("KALSHI_PRIVATE_KEY", "")
+# Credentials — loaded from environment or .kalshi-private-key.pem
+API_KEY_ID = os.environ.get("KALSHI_API_KEY_ID", "4308d1ca-585e-4b73-be82-5c0968b9a59a")
+_key_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.kalshi-private-key.pem')
+if os.path.exists(_key_file):
+    with open(_key_file) as _f:
+        PRIVATE_KEY = _f.read().strip()
+elif os.environ.get("KALSHI_PRIVATE_KEY"):
+    PRIVATE_KEY = os.environ["KALSHI_PRIVATE_KEY"]
+else:
+    print("❌ Kalshi private key not found! Set KALSHI_PRIVATE_KEY env or create .kalshi-private-key.pem")
+    sys.exit(1)
 
 BASE_URL = "https://api.elections.kalshi.com"
 
@@ -116,7 +125,19 @@ MAX_POSITION_PCT = 0.05    # Max 5% of portfolio per position
 KELLY_FRACTION = 0.25      # Quarter-Kelly: conservative (Grok uses 0.75 but we need data first)
 MIN_BET_CENTS = 5
 MAX_BET_CENTS = 200        # $2 max per trade (2% of $100 bankroll — conservative until profitable)
-MAX_POSITIONS = 15         # Max open positions (Grok rec)
+MAX_POSITIONS = 15         # Max open positions (Grok rec) — overridden by dynamic_max_positions()
+
+
+def dynamic_max_positions(balance: float) -> int:
+    """PROC-002 Task 3.1: Scale max positions with balance. Min 5, max 20."""
+    if balance <= 50:
+        return 5
+    elif balance <= 100:
+        return int(5 + (balance - 50) * 0.2)  # 5-15
+    elif balance <= 200:
+        return int(15 + (balance - 100) * 0.05)  # 15-20
+    else:
+        return 20
 
 # ── Risk/Reward filters (TRADE-003: fix loss 2x > win asymmetry) ──
 # BUY_NO at >50¢ means you risk more than you win. Require bigger edge to justify.
@@ -1060,6 +1081,67 @@ def get_crypto_ohlc(coin_id: str = "bitcoin", days: int = 7) -> list:
 
 
 # ============================================================================
+# DYNAMIC VOLATILITY (PROC-002 Task 5.1 — fetch from CoinGecko)
+# ============================================================================
+
+_vol_cache = {}  # {asset: (timestamp, hourly_vol)}
+
+def get_dynamic_hourly_vol(asset: str = "btc") -> float:
+    """Compute realized hourly vol from CoinGecko 7d OHLC data.
+    Returns hourly std dev of log returns. Falls back to static constants."""
+    global _vol_cache
+    
+    # Cache for 1 hour
+    now = time.time()
+    if asset in _vol_cache and (now - _vol_cache[asset][0]) < 3600:
+        return _vol_cache[asset][1]
+    
+    coin_id = "bitcoin" if asset == "btc" else "ethereum"
+    fallback = BTC_HOURLY_VOL if asset == "btc" else ETH_HOURLY_VOL
+    
+    try:
+        ohlc = get_crypto_ohlc(coin_id, days=7)
+        if not ohlc or len(ohlc) < 24:
+            return fallback
+        
+        # CoinGecko 7d OHLC gives ~4h candles (42 candles for 7 days)
+        # Compute log returns from close prices
+        closes = [c[4] for c in ohlc if c[4] and c[4] > 0]
+        if len(closes) < 10:
+            return fallback
+        
+        log_returns = [math.log(closes[i] / closes[i-1]) for i in range(1, len(closes))]
+        if not log_returns:
+            return fallback
+        
+        # Std dev of log returns
+        mean_ret = sum(log_returns) / len(log_returns)
+        variance = sum((r - mean_ret) ** 2 for r in log_returns) / len(log_returns)
+        candle_vol = math.sqrt(variance)
+        
+        # Scale to hourly: CoinGecko 7d gives ~4h candles
+        # hourly_vol = candle_vol / sqrt(candle_hours)
+        total_hours = (ohlc[-1][0] - ohlc[0][0]) / (1000 * 3600)  # ms to hours
+        candle_hours = total_hours / len(log_returns) if len(log_returns) > 0 else 4
+        hourly_vol = candle_vol / math.sqrt(max(1, candle_hours))
+        
+        # Sanity bounds: 0.3% - 5% hourly
+        hourly_vol = max(0.003, min(0.05, hourly_vol))
+        
+        _vol_cache[asset] = (now, hourly_vol)
+        structured_log("dynamic_vol", {
+            "asset": asset, "hourly_vol_pct": round(hourly_vol * 100, 3),
+            "candles": len(closes), "candle_hours": round(candle_hours, 1),
+            "fallback_pct": round(fallback * 100, 3)
+        })
+        return hourly_vol
+        
+    except Exception as e:
+        structured_log("dynamic_vol_error", {"asset": asset, "error": str(e)}, level="warning")
+        return fallback
+
+
+# ============================================================================
 # MOMENTUM & REGIME DETECTION (from v2)
 # ============================================================================
 
@@ -1166,6 +1248,28 @@ def detect_market_regime(ohlc_data: list, momentum: dict) -> dict:
 
     if vol_class in ("high", "very_high"):
         result["dynamic_min_edge"] += 0.02  # Extra penalty for high volatility (was 0.01)
+
+    # PROC-002 Task 5.2: Vol regime classifier — scale MIN_EDGE and Kelly by vol factor
+    # Compare dynamic vol to assumed vol, adjust thresholds
+    for asset_key in ("btc", "eth"):
+        assumed = BTC_HOURLY_VOL if asset_key == "btc" else ETH_HOURLY_VOL
+        current = get_dynamic_hourly_vol(asset_key)
+        vol_factor = current / assumed if assumed > 0 else 1.0
+        if vol_factor > 1.5:
+            # High vol regime: tighten edge, reduce Kelly
+            result["dynamic_min_edge"] *= (1 + (vol_factor - 1) * 0.4)
+            result["vol_kelly_scale"] = 1.0 / vol_factor  # de-risk
+            result["vol_regime"] = "high_vol"
+        elif vol_factor < 0.7:
+            # Low vol regime: loosen edge slightly, increase Kelly
+            result["dynamic_min_edge"] *= 0.8
+            result["vol_kelly_scale"] = min(1.2, 1.0 / vol_factor)
+            result["vol_regime"] = "low_vol"
+        else:
+            result["vol_kelly_scale"] = 1.0
+            result["vol_regime"] = "normal_vol"
+        result["vol_factor"] = round(vol_factor, 2)
+        break  # Use first asset for now (most positions are BTC)
 
     # Store ATR info for asset-specific filtering (Grok recommendation #4)
     result["avg_candle_range_pct"] = avg_range
@@ -1561,7 +1665,8 @@ def _heuristic_crypto(market: MarketInfo, context: dict = None) -> tuple:
 
     # Get hourly vol using EWMA (GROK-TRADE-006: dynamic vol estimation)
     # EWMA gives more weight to recent returns, captures vol clustering in crypto
-    hourly_vol = {"btc": BTC_HOURLY_VOL, "eth": ETH_HOURLY_VOL}.get(asset, 0.005)
+    # PROC-002 Task 5.1: use dynamic vol from CoinGecko, fallback to static
+    hourly_vol = get_dynamic_hourly_vol(asset) if asset in ("btc", "eth") else 0.005
     ohlc_data = (context or {}).get("ohlc", {}).get(asset, [])
     if ohlc_data and len(ohlc_data) >= 10:
         try:
@@ -1620,10 +1725,16 @@ def _heuristic_crypto(market: MarketInfo, context: dict = None) -> tuple:
 
     # Sentiment adjustment (Fear & Greed Index)
     # F&G 10 = extreme fear → bearish bias; F&G 90 = extreme greed → bullish bias
-    # Scale: at F&G=10 → -6% adj; at F&G=90 → +6% adj; at F&G=50 → 0
+    # FIXED: Previous /500 was too weak (only -8% at extreme fear)
+    # New: at F&G=10 → -16% adj; at F&G=90 → +16% adj; at F&G=50 → 0
+    # Extreme fear (F&G < 20) gets EXTRA penalty since markets trend DOWN in fear
     fng = (context or {}).get("sentiment", {})
     sentiment_val = fng.get("value", 50)
-    sentiment_adj = (sentiment_val - 50) / 500  # -8% to +8% range (was /1500, way too weak)
+    sentiment_adj = (sentiment_val - 50) / 250  # -20% to +20% range (was /500 = -8%, way too weak)
+    # Extra bearish penalty in extreme fear — the market trends DOWN hard
+    if sentiment_val < 20:
+        extreme_fear_penalty = (20 - sentiment_val) / 100  # up to -20% extra at F&G=0
+        sentiment_adj -= extreme_fear_penalty
     prob_above += sentiment_adj
 
     # Regime adjustment: choppy + high vol = shrink toward 50% more (less directional confidence)
@@ -1785,8 +1896,30 @@ def make_trade_decision(market: MarketInfo, forecast: ForecastResult, critic: Cr
                         balance: float) -> TradeDecision:
     """Compare probability vs market price and decide. Uses split thresholds (v3 data-driven)."""
     final_prob = 0.6 * forecast.probability + 0.4 * critic.adjusted_probability
+
+    # PROC-002 Task 6.2: Overconfidence decay — shrink toward 50% for markets closing >48h out
+    try:
+        close_str = getattr(market, 'expiry', '') or ''
+        if close_str:
+            close_dt = datetime.fromisoformat(close_str.replace("Z", "+00:00"))
+            hours_to_close = (close_dt - datetime.now(timezone.utc)).total_seconds() / 3600
+            if hours_to_close > 48:
+                decay_rate = 0.003  # -0.3% per hour past 48h
+                decay_hours = min(hours_to_close - 48, 200)  # cap at 200h extra
+                decay = decay_rate * decay_hours
+                final_prob = final_prob * (1 - decay) + 0.5 * decay  # shrink toward 50%
+                final_prob = max(0.01, min(0.99, final_prob))
+    except Exception:
+        pass  # Don't break on parsing errors
     market_prob = market.market_prob
     edge_yes = final_prob - market_prob
+    
+    # Subtract round-trip fees/slippage (Grok review #2: edge overstated by 1-3%)
+    ROUND_TRIP_FEE = 0.007  # ~0.7% taker fees on Kalshi
+    if edge_yes > 0:
+        edge_yes -= ROUND_TRIP_FEE
+    elif edge_yes < 0:
+        edge_yes += ROUND_TRIP_FEE  # For BUY_NO, edge_yes is negative
 
     # Split thresholds
     if edge_yes > 0:
@@ -1855,8 +1988,30 @@ def make_trade_decision(market: MarketInfo, forecast: ForecastResult, critic: Cr
                             reason=f"Risk/reward {risk_reward:.2f} > {MAX_RISK_REWARD_RATIO} ({side_price}¢ risk / {potential_win}¢ win)",
                             forecast=forecast, critic=critic)
 
-    # Kelly sizing
+    # Kelly sizing (PROC-002 Task 5.2: apply vol regime scaling)
     kelly_frac = calculate_kelly(final_prob if action == "BUY_YES" else (1 - final_prob), side_price)
+
+    # PROC-002 Task 4.2: Recovery mode — halve Kelly when drawdown > 10%
+    if DRAWDOWN_PEAK_BALANCE > 0 and balance < DRAWDOWN_PEAK_BALANCE:
+        current_drawdown = (DRAWDOWN_PEAK_BALANCE - balance) / DRAWDOWN_PEAK_BALANCE
+        if current_drawdown > 0.20:
+            kelly_frac *= 0.25  # Severe drawdown: quarter Kelly
+            structured_log("recovery_mode", {"drawdown_pct": round(current_drawdown * 100, 1),
+                                             "kelly_scale": 0.25}, level="warning")
+        elif current_drawdown > 0.10:
+            kelly_frac *= 0.50  # Moderate drawdown: halve Kelly
+            structured_log("recovery_mode", {"drawdown_pct": round(current_drawdown * 100, 1),
+                                             "kelly_scale": 0.50}, level="warning")
+
+    # PROC-002 Task 5.2: Scale Kelly by vol regime factor
+    asset = "btc" if "btc" in market.ticker.lower() or "BTC" in market.ticker else "eth"
+    dyn_vol = get_dynamic_hourly_vol(asset)
+    assumed_vol = BTC_HOURLY_VOL if asset == "btc" else ETH_HOURLY_VOL
+    vol_factor = dyn_vol / assumed_vol if assumed_vol > 0 else 1.0
+    if vol_factor > 1.5:
+        kelly_frac /= vol_factor  # de-risk in high vol
+    elif vol_factor < 0.7:
+        kelly_frac *= min(1.2, 1.0 / vol_factor)  # slightly more aggressive in low vol
     if kelly_frac <= 0:
         return TradeDecision(action="SKIP", edge=edge, kelly_size=0, contracts=0, price_cents=side_price,
                             reason="Kelly says no bet", forecast=forecast, critic=critic)
@@ -2231,7 +2386,9 @@ def update_trade_results():
                     # Check if market settled
                     result = kalshi_api("GET", f"/trade-api/v2/markets/{entry['ticker']}")
                     if "error" not in result:
-                        market_result = result.get("result", "")
+                        # API returns {"market": {"result": "yes"/"no", ...}}
+                        market_data = result.get("market", result)
+                        market_result = market_data.get("result", "")
                         if market_result:
                             action = entry.get("action", "")
                             side = "yes" if action == "BUY_YES" else "no"
@@ -2352,8 +2509,10 @@ def paper_trade_open(state: dict, ticker: str, action: str, price_cents: int, co
     """Record a new paper trade: deduct cost from bankroll, add to positions."""
     # Check max positions limit (Grok review bug #3)
     open_positions = [p for p in state.get("positions", []) if p.get("status") == "open"]
-    if len(open_positions) >= MAX_POSITIONS:
-        print(f"  ⚠️ Max positions ({MAX_POSITIONS}) reached, skipping {ticker}")
+    current_balance = state.get("current_balance_cents", 10000) / 100
+    dyn_max = dynamic_max_positions(current_balance)
+    if len(open_positions) >= dyn_max:
+        print(f"  ⚠️ Max positions ({dyn_max}, balance ${current_balance:.0f}) reached, skipping {ticker}")
         return
     
     cost = contracts * price_cents
@@ -2665,7 +2824,7 @@ def run_cycle(dry_run: bool = True, max_markets: int = 30, max_trades: int = 10)
 
     # ── LLM status ──
     use_heuristic = True
-    if LLM_CONFIG and not LLM_CONFIG.get("api_key", "").startswith("sk-ant-oat"):
+    if LLM_CONFIG:
         print(f"✅ LLM: {LLM_CONFIG['provider']} / {LLM_CONFIG['model']}")
         use_heuristic = False
     else:
@@ -2673,15 +2832,40 @@ def run_cycle(dry_run: bool = True, max_markets: int = 30, max_trades: int = 10)
 
     # ── Balance ──
     balance = get_balance()
-    print(f"💰 Balance: ${balance:.2f}")
-    if dry_run and balance < 1.0:
-        balance = VIRTUAL_BALANCE
-        print(f"   📝 Using virtual balance: ${balance:.2f} (paper mode)")
+    print(f"💰 Real balance: ${balance:.2f}")
+    if dry_run:
+        # In paper mode, use the paper state balance (tracks P&L from settlements)
+        paper_st = load_paper_state()
+        paper_balance = paper_st.get("current_balance_cents", PAPER_STARTING_BANKROLL_CENTS) / 100.0
+        if paper_balance > 0:
+            balance = paper_balance
+        elif balance < 1.0:
+            balance = VIRTUAL_BALANCE
+        print(f"   📝 Paper balance: ${balance:.2f}")
 
     # ── Positions ──
-    positions = get_positions()
-    num_positions = len(positions)
-    print(f"📊 Open positions: {num_positions}/{MAX_POSITIONS}")
+    # In paper mode, use paper state positions (not real API positions which may
+    # contain stale real-money positions like KXTRUMPFIRE)
+    if dry_run:
+        paper_state = load_paper_state()
+        paper_positions = [p for p in paper_state.get("positions", []) if p.get("status") == "open"]
+        # Convert paper positions to the format manage_positions expects
+        positions = []
+        for pp in paper_positions:
+            contracts = pp.get("contracts", 1)
+            is_no = pp.get("action") == "BUY_NO"
+            positions.append({
+                "ticker": pp.get("ticker", ""),
+                "position": -contracts if is_no else contracts,
+                "market_exposure": pp.get("cost_cents", 0),
+                "total_traded": pp.get("cost_cents", 0),
+            })
+        num_positions = len(positions)
+    else:
+        positions = get_positions()
+        num_positions = len(positions)
+    dyn_max_pos = dynamic_max_positions(balance)
+    print(f"📊 Open positions: {num_positions}/{dyn_max_pos} (dynamic, balance ${balance:.0f})")
 
     # ── Position Management: Trailing Stop / Early Exit (TRADE-017) ──
     if TRAILING_STOP_ENABLED and positions:
@@ -2690,11 +2874,16 @@ def run_cycle(dry_run: bool = True, max_markets: int = 30, max_trades: int = 10)
         if exits > 0:
             print(f"   ✅ Exited {exits} position(s)")
             # Refresh positions after exits
-            positions = get_positions()
-            num_positions = len(positions)
-            print(f"📊 Open positions after exits: {num_positions}/{MAX_POSITIONS}")
+            if dry_run:
+                paper_state = load_paper_state()
+                positions = [p for p in paper_state.get("positions", []) if p.get("status") == "open"]
+                num_positions = len(positions)
+            else:
+                positions = get_positions()
+                num_positions = len(positions)
+            print(f"📊 Open positions after exits: {num_positions}/{dyn_max_pos}")
 
-    if num_positions >= MAX_POSITIONS:
+    if num_positions >= dyn_max_pos:
         print("⚠️ Max positions reached")
         return
 
