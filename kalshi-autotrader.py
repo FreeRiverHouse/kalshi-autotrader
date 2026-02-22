@@ -99,7 +99,7 @@ except Exception:
 
 # Credentials — loaded from environment or .kalshi-private-key.pem
 API_KEY_ID = os.environ.get("KALSHI_API_KEY_ID", "4308d1ca-585e-4b73-be82-5c0968b9a59a")
-_key_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.kalshi-private-key.pem')
+_key_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.kalshi-private-key.pem')
 if os.path.exists(_key_file):
     with open(_key_file) as _f:
         PRIVATE_KEY = _f.read().strip()

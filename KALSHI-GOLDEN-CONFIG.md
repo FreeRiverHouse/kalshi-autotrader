@@ -1,7 +1,7 @@
 # ⚡ KALSHI GOLDEN CONFIG
 
 **Unica fonte di verità per il trading Kalshi. LEGGI QUESTO E BASTA.**
-**Ultimo aggiornamento: 2026-02-16 19:18 PST**
+**Ultimo aggiornamento: 2026-02-22 PST**
 
 ---
 
@@ -106,11 +106,19 @@ Target: avg price ≤25¢ per un breakeven raggiungibile (~25% WR)
 
 ## 🔧 COME MODIFICARE
 
-1. **Cambia parametri in** `scripts/kalshi-autotrader.py`
+**Repo standalone: `/Users/mattia/Projects/kalshi-autotrader/`**
+**GitHub: https://github.com/FreeRiverHouse/kalshi-autotrader**
+
+1. **Cambia parametri in** `kalshi-autotrader.py`
 2. **Aggiorna QUESTO file** con i nuovi valori
 3. **Commit + push** entrambi
-4. **Riavvia autotrader**: `pkill -f kalshi-autotrader && python3 -u scripts/kalshi-autotrader.py --loop 300 > scripts/kalshi-autotrader.log 2>&1 &`
-5. **Verifica primo ciclo**: `grep "trade_executed" scripts/kalshi-autotrader.log`
+4. **Riavvia autotrader**:
+   ```bash
+   cd /Users/mattia/Projects/kalshi-autotrader
+   pkill -f kalshi-autotrader
+   nohup /opt/homebrew/bin/python3 -u kalshi-autotrader.py --loop 300 >> kalshi-autotrader.log 2>&1 &
+   ```
+5. **Verifica primo ciclo**: `tail -f /Users/mattia/Projects/kalshi-autotrader/kalshi-autotrader.log`
 
 ---
 
