@@ -206,13 +206,13 @@ ETH_HOURLY_VOL = 0.0118  # ~1.18% hourly std dev (Grok review: actual avg, more 
 CRYPTO_FAT_TAIL_MULTIPLIER = 1.0  # Disabled after v2 disaster analysis
 
 # ── Logging paths ──
-PROJECT_ROOT = Path(__file__).parent.parent
-TRADE_LOG_FILE = PROJECT_ROOT / "data" / "trading" / "kalshi-unified-trades.jsonl"
-V3_TRADE_LOG   = PROJECT_ROOT / "data" / "trading" / "kalshi-v3-trades.jsonl"  # For gist push compatibility
-CYCLE_LOG_FILE = PROJECT_ROOT / "data" / "trading" / "kalshi-unified-cycles.jsonl"
-SKIP_LOG_FILE  = PROJECT_ROOT / "data" / "trading" / "kalshi-unified-skips.jsonl"
-# Also write to legacy location for compatibility
-LEGACY_TRADE_LOG = Path(__file__).parent / "kalshi-trades.jsonl"
+PROJECT_ROOT = Path(__file__).parent  # Standalone repo: logs live inside the repo dir
+_DATA_DIR = PROJECT_ROOT / "data" / "trading"
+TRADE_LOG_FILE = _DATA_DIR / "kalshi-unified-trades.jsonl"
+V3_TRADE_LOG   = _DATA_DIR / "kalshi-v3-trades.jsonl"
+CYCLE_LOG_FILE = _DATA_DIR / "kalshi-unified-cycles.jsonl"
+SKIP_LOG_FILE  = _DATA_DIR / "kalshi-unified-skips.jsonl"
+LEGACY_TRADE_LOG = PROJECT_ROOT / "kalshi-trades.jsonl"
 
 # ── Alert files (v2 compat) ──
 CIRCUIT_BREAKER_STATE_FILE = Path(__file__).parent / "kalshi-circuit-breaker.json"
@@ -224,7 +224,7 @@ API_ERROR_ALERT_FILE = Path(__file__).parent / "kalshi-api-error.alert"
 MAX_EXPOSURE_ALERT_FILE = Path(__file__).parent / "kalshi-max-exposure.alert"
 
 # ── Alert + log files (GROK-TRADE-004: post-trade monitoring) ──
-DECISION_LOG_FILE = PROJECT_ROOT / "data" / "trading" / "kalshi-decisions.jsonl"
+DECISION_LOG_FILE = _DATA_DIR / "kalshi-decisions.jsonl"
 LOSS_STREAK_ALERT_FILE = Path(__file__).parent / "kalshi-loss-streak.alert"
 HIGH_EDGE_CLUSTER_ALERT_FILE = Path(__file__).parent / "kalshi-high-edge-cluster.alert"
 
@@ -235,11 +235,11 @@ MAX_DAILY_TRADES = 200           # Hard cap on trades per day (relaxed for paper
 MAX_DAILY_EXPOSURE_USD = 50.0    # GROK-TRADE-004: Absolute $ cap on daily new exposure
 
 # ── Paper trade state (bankroll/positions tracking for dashboard) ──
-PAPER_STATE_FILE = PROJECT_ROOT / "data" / "trading" / "paper-trade-state.json"
+PAPER_STATE_FILE = _DATA_DIR / "paper-trade-state.json"
 PAPER_STARTING_BANKROLL_CENTS = 10000  # $100 virtual bankroll (matches planned live bankroll)
 
 # ── Structured logging (GROK-TRADE-002) ──
-AUTOTRADER_LOG_FILE = PROJECT_ROOT / "data" / "trading" / "kalshi-autotrader.log"
+AUTOTRADER_LOG_FILE = _DATA_DIR / "kalshi-autotrader.log"
 
 # ── Drawdown tracking (GROK-TRADE-002) ──
 DRAWDOWN_PEAK_BALANCE = 0.0      # Tracked in-memory, seeded from balance on startup
