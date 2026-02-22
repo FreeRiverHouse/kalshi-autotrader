@@ -119,6 +119,8 @@ VIRTUAL_BALANCE = 100.0  # Virtual balance for paper mode when real balance < $1
 # BUY_NO: 76% WR overall → low bar.  BUY_YES: 19% WR overall → high bar.
 MIN_EDGE_BUY_NO  = 0.02   # 2% min for BUY_NO  (paper mode: collect data aggressively)
 MIN_EDGE_BUY_YES = 0.04   # 4% min for BUY_YES (lowered for data collection in paper mode)
+CALIBRATION_FACTOR = 0.65  # Shrink LLM/heuristic probs toward 50% to correct overconfidence
+                            # (Grok: predicted 71.5% → actual 46.2%, ratio ~0.65)
 MIN_EDGE = 0.02            # Global minimum (paper mode: more trades = more data)
 MAX_EDGE_CAP = 0.10        # Cap edges >10% (overconfident forecaster at >10%: 0% WR)
 MAX_POSITION_PCT = 0.05    # Max 5% of portfolio per position
@@ -1405,7 +1407,10 @@ What is the TRUE probability this resolves YES?"""
                               confidence="low", model_used="error", tokens_used=0)
 
     content = result["content"]
-    prob = parse_probability(content) or market.market_prob
+    raw_prob = parse_probability(content) or market.market_prob
+    # Apply calibration: shrink toward 50% to correct LLM overconfidence
+    prob = 0.5 + (raw_prob - 0.5) * CALIBRATION_FACTOR
+    prob = max(0.05, min(0.95, prob))
     confidence = "medium"
     conf_match = re.search(r'CONFIDENCE:\s*(low|medium|high)', content, re.IGNORECASE)
     if conf_match:
@@ -1449,7 +1454,10 @@ Is the forecaster overconfident? Missing factors? Is the edge real?"""
                             reasoning=f"Error: {result['error']}")
 
     content = result["content"]
-    adj_prob = parse_probability(content) or forecast.probability
+    raw_adj = parse_probability(content) or forecast.probability
+    # Apply same calibration to critic's adjusted probability
+    adj_prob = 0.5 + (raw_adj - 0.5) * CALIBRATION_FACTOR
+    adj_prob = max(0.05, min(0.95, adj_prob))
     major_flaws = []
     flaws_match = re.search(r'MAJOR_FLAWS:\s*(.+)', content, re.IGNORECASE)
     if flaws_match:
@@ -1750,9 +1758,7 @@ def _heuristic_crypto(market: MarketInfo, context: dict = None) -> tuple:
 
     prob_above = max(0.05, min(0.95, prob_above))
 
-    # Calibration scaling (Grok rec: predicted 71.5% → actual 46.2%, ratio ~0.65)
-    # Shrink probabilities toward 50% to reduce overconfidence
-    CALIBRATION_FACTOR = 0.75  # Grok review: 0.65 too conservative, optimal 0.70-0.80
+    # Calibration scaling — use global CALIBRATION_FACTOR (same as LLM forecaster)
     prob_above = 0.5 + (prob_above - 0.5) * CALIBRATION_FACTOR
     prob_above = max(0.05, min(0.95, prob_above))
 
@@ -1897,15 +1903,16 @@ def make_trade_decision(market: MarketInfo, forecast: ForecastResult, critic: Cr
     """Compare probability vs market price and decide. Uses split thresholds (v3 data-driven)."""
     final_prob = 0.6 * forecast.probability + 0.4 * critic.adjusted_probability
 
-    # PROC-002 Task 6.2: Overconfidence decay — shrink toward 50% for markets closing >48h out
+    # PROC-002 Task 6.2: Overconfidence decay — shrink toward 50% for markets closing >72h out
+    # (Grok review: 48h too aggressive, raised to 72h — still catches long-term overconfidence)
     try:
         close_str = getattr(market, 'expiry', '') or ''
         if close_str:
             close_dt = datetime.fromisoformat(close_str.replace("Z", "+00:00"))
             hours_to_close = (close_dt - datetime.now(timezone.utc)).total_seconds() / 3600
-            if hours_to_close > 48:
-                decay_rate = 0.003  # -0.3% per hour past 48h
-                decay_hours = min(hours_to_close - 48, 200)  # cap at 200h extra
+            if hours_to_close > 72:
+                decay_rate = 0.003  # -0.3% per hour past 72h
+                decay_hours = min(hours_to_close - 72, 200)  # cap at 200h extra
                 decay = decay_rate * decay_hours
                 final_prob = final_prob * (1 - decay) + 0.5 * decay  # shrink toward 50%
                 final_prob = max(0.01, min(0.99, final_prob))
@@ -1921,16 +1928,27 @@ def make_trade_decision(market: MarketInfo, forecast: ForecastResult, critic: Cr
     elif edge_yes < 0:
         edge_yes += ROUND_TRIP_FEE  # For BUY_NO, edge_yes is negative
 
+    # Dynamic edge minimum based on liquidity (Grok review: illiquid markets need higher bar)
+    # Low volume (<1k contracts) → add 1% to min edge. Very low (<500) → add 2%.
+    if market.volume < 500:
+        liq_edge_bump = 0.02
+    elif market.volume < 1000:
+        liq_edge_bump = 0.01
+    else:
+        liq_edge_bump = 0.0
+    dyn_min_yes = MIN_EDGE_BUY_YES + liq_edge_bump
+    dyn_min_no  = MIN_EDGE_BUY_NO  + liq_edge_bump
+
     # Split thresholds
     if edge_yes > 0:
-        if edge_yes < MIN_EDGE_BUY_YES:
+        if edge_yes < dyn_min_yes:
             return TradeDecision(action="SKIP", edge=edge_yes, kelly_size=0, contracts=0,
-                                price_cents=0, reason=f"BUY_YES edge {edge_yes:.1%} < {MIN_EDGE_BUY_YES:.0%}",
+                                price_cents=0, reason=f"BUY_YES edge {edge_yes:.1%} < {dyn_min_yes:.0%} (vol={market.volume})",
                                 forecast=forecast, critic=critic)
     else:
-        if abs(edge_yes) < MIN_EDGE_BUY_NO:
+        if abs(edge_yes) < dyn_min_no:
             return TradeDecision(action="SKIP", edge=edge_yes, kelly_size=0, contracts=0,
-                                price_cents=0, reason=f"BUY_NO edge {abs(edge_yes):.1%} < {MIN_EDGE_BUY_NO:.0%}",
+                                price_cents=0, reason=f"BUY_NO edge {abs(edge_yes):.1%} < {dyn_min_no:.0%} (vol={market.volume})",
                                 forecast=forecast, critic=critic)
 
     if not critic.should_trade:
