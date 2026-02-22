@@ -14,7 +14,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-DASHBOARD_URL = "http://localhost:8889"
+DASHBOARD_URL = "http://localhost:8888"
 AUTOTRADER    = Path(__file__).parent / "kalshi-autotrader.py"
 LOG_FILE      = Path(__file__).parent / "data" / "trading" / "feedback-agent.log"
 
