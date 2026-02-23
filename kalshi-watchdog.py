@@ -33,16 +33,18 @@ DASHBOARD_SCRIPT = BASE / "kalshi-dashboard.py"
 WATCHDOG_LOG = BASE / "data" / "trading" / "watchdog.log"
 PYTHON      = "/opt/homebrew/bin/python3.11"
 DASHBOARD_URL = "http://localhost:8888"
+CLAUDE_MODEL  = "claude-sonnet-4-6"
+
 def _load_api_key() -> str:
-    key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if key:
-        return key
+    """Load OAuth token from .env.trading (same source as autotrader)."""
+    # 1. .env.trading — source of truth, same as autotrader
     env_file = Path.home() / ".clawdbot" / ".env.trading"
     if env_file.exists():
         for line in env_file.read_text().splitlines():
             if line.startswith("ANTHROPIC_API_KEY="):
                 return line.split("=", 1)[1].strip()
-    return ""
+    # 2. env var fallback
+    return os.environ.get("ANTHROPIC_API_KEY", "")
 
 ANTHROPIC_API_KEY = _load_api_key()
 
@@ -203,12 +205,6 @@ REPORT:
 
 Rispondi in italiano, breve e diretto. Max 200 parole."""
 
-        payload = json.dumps({
-            "model": "claude-haiku-4-5-20251001",
-            "max_tokens": 300,
-            "messages": [{"role": "user", "content": prompt}]
-        }).encode()
-
         is_oauth = ANTHROPIC_API_KEY.startswith("sk-ant-oat")
         headers = {
             "anthropic-version": "2023-06-01",
@@ -219,6 +215,12 @@ Rispondi in italiano, breve e diretto. Max 200 parole."""
             headers["anthropic-beta"] = "oauth-2025-04-20"
         else:
             headers["x-api-key"] = ANTHROPIC_API_KEY
+
+        payload = json.dumps({
+            "model": CLAUDE_MODEL,
+            "max_tokens": 400,
+            "messages": [{"role": "user", "content": prompt}]
+        }).encode()
 
         req = urllib.request.Request(
             "https://api.anthropic.com/v1/messages",
