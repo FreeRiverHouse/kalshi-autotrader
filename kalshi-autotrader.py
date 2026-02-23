@@ -370,11 +370,14 @@ def get_llm_config():
                     env_vars[k.strip()] = v.strip()
         if "ANTHROPIC_API_KEY" in env_vars and env_vars["ANTHROPIC_API_KEY"].startswith("sk-ant-"):
             key = env_vars["ANTHROPIC_API_KEY"]
-            auth_h = {"Authorization": f"Bearer {key}"} if key.startswith("sk-ant-oat") else {"x-api-key": key}
+            if key.startswith("sk-ant-oat"):
+                auth_h = {"Authorization": f"Bearer {key}", "anthropic-beta": "oauth-2025-04-20"}
+            else:
+                auth_h = {"x-api-key": key}
             return {
                 "provider": "anthropic", "api_key": key,
                 "base_url": "https://api.anthropic.com/v1/messages",
-                "model": env_vars.get("CLAUDE_MODEL", "claude-sonnet-4-20250514"),
+                "model": env_vars.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001"),
                 "headers": {**auth_h, "anthropic-version": "2023-06-01", "content-type": "application/json"}
             }
         if "OPENROUTER_API_KEY" in env_vars:

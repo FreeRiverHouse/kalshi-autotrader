@@ -564,20 +564,26 @@ function dash(){
       const m=this.m,roi=this.roi,tr=this.trades,b=this.base();
       const cycles=this.cycles,daily=this.daily,hourly=this.hourly,ch=this.cycleHourly;
 
-      /* Bankroll */
-      const bk=m.bankroll_series&&m.bankroll_series.length?m.bankroll_series:
-        roi.map(r=>({t:r.t,v:+(m.starting_balance_usd+r.v/100*m.starting_balance_usd).toFixed(2)}));
-      this.mk('ch-bankroll',{...b,
-        chart:{...b.chart,type:'area',height:210},
-        series:[{name:'Bankroll ($)',data:bk.map(p=>({x:p.t,y:p.v}))}],
-        stroke:{curve:'smooth',width:2},
-        fill:{type:'gradient',gradient:{shadeIntensity:1,opacityFrom:.42,opacityTo:.03,stops:[0,100]}},
-        colors:['#06b6d4'],
-        markers:{size:bk.length<25?4:0,colors:['#06b6d4'],strokeWidth:0},
-        yaxis:{...b.yaxis,labels:{...b.yaxis.labels,formatter:v=>'$'+v.toFixed(0)}},
-        xaxis:{...b.xaxis,type:'category',labels:{...b.xaxis.labels,rotate:-30,maxHeight:55,
-               formatter:v=>v?v.slice(5,16):''}},
-      });
+      /* Bankroll — fallback to cycle data when no settled trades yet */
+      let bk=m.bankroll_series&&m.bankroll_series.length?m.bankroll_series:null;
+      if(!bk&&cycles&&cycles.length) bk=cycles.map(c=>({t:c.t,v:c.b}));
+      if(!bk&&roi&&roi.length) bk=roi.map(r=>({t:r.t,v:+(m.starting_balance_usd+r.v/100*m.starting_balance_usd).toFixed(2)}));
+      if(bk&&bk.length){
+        const bkLabel=m.bankroll_series&&m.bankroll_series.length?'Bankroll ($)':'Balance per Ciclo ($)';
+        this.mk('ch-bankroll',{...b,
+          chart:{...b.chart,type:'area',height:210},
+          series:[{name:bkLabel,data:bk.map(p=>({x:p.t,y:p.v}))}],
+          stroke:{curve:'smooth',width:2},
+          fill:{type:'gradient',gradient:{shadeIntensity:1,opacityFrom:.42,opacityTo:.03,stops:[0,100]}},
+          colors:['#06b6d4'],
+          markers:{size:bk.length<40?4:0,colors:['#06b6d4'],strokeWidth:0},
+          yaxis:{...b.yaxis,labels:{...b.yaxis.labels,formatter:v=>'$'+v.toFixed(2)}},
+          xaxis:{...b.xaxis,type:'category',tickAmount:Math.min(bk.length,12),
+                 labels:{...b.xaxis.labels,rotate:-30,maxHeight:55,formatter:v=>v?v.slice(5,16):''}},
+          annotations:{yaxis:[{y:m.starting_balance_usd,borderColor:'#f59e0b',strokeDashArray:4,
+            label:{text:'Start',style:{background:'rgba(245,158,11,.12)',color:'#f59e0b',fontSize:'9px'}}}]},
+        });
+      }
 
       /* ROI */
       const lv=roi.length?roi[roi.length-1].v:0;
@@ -767,4 +773,4 @@ def dashboard():
 
 if __name__ == "__main__":
     print("🚀 Kalshi Dashboard → http://localhost:8888")
-    app.run(host="0.0.0.0", port=8888, debug=False)
+    app.run(host="::", port=8888, debug=False)

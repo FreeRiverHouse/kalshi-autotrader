@@ -241,7 +241,7 @@ def get_metrics() -> dict:
         loss_row   = conn.execute("SELECT SUM(pnl_cents) FROM trades WHERE result_status='lost'").fetchone()
 
         avg_edge_row = conn.execute(
-            "SELECT AVG(edge) FROM trades WHERE result_status IN ('won','lost')"
+            "SELECT AVG(edge) FROM trades WHERE edge IS NOT NULL"
         ).fetchone()
 
         cats = conn.execute("""
