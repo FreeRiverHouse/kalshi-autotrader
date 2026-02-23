@@ -158,6 +158,14 @@ def upsert_trade_by_ticker_ts(t: dict):
 
 
 def insert_cycle(c: dict):
+    # Accept both canonical keys and autotrader keys (balance$/duration_s/trades_executed)
+    balance_raw = c.get("balance_cents")
+    if balance_raw is None and c.get("balance") is not None:
+        balance_raw = int(round(c["balance"] * 100))
+    duration_raw = c.get("duration_ms")
+    if duration_raw is None and c.get("duration_s") is not None:
+        duration_raw = int(c["duration_s"] * 1000)
+    trades_placed = c.get("trades_placed") or c.get("trades_executed", 0)
     with get_conn() as conn:
         conn.execute("""
             INSERT OR IGNORE INTO cycles
@@ -169,9 +177,9 @@ def insert_cycle(c: dict):
             c.get("cycle_id"),
             c.get("markets_scanned", 0),
             c.get("trades_attempted", 0),
-            c.get("trades_placed", 0),
-            c.get("balance_cents"),
-            c.get("duration_ms"),
+            trades_placed,
+            balance_raw,
+            duration_raw,
             c.get("error"),
         ))
 
@@ -296,6 +304,104 @@ def get_roi_series() -> list[dict]:
             "n": r["n"],
         })
     return series
+
+
+def get_cycle_series(limit: int = 1000) -> list[dict]:
+    """Cycle timestamps + balance_cents for time-series chart. Returns oldest→newest."""
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT timestamp, balance_cents, trades_placed, markets_scanned, duration_ms
+            FROM cycles
+            WHERE balance_cents IS NOT NULL
+            ORDER BY timestamp DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+    return [
+        {
+            "t":  r["timestamp"][:19].replace("T", " "),
+            "b":  round(r["balance_cents"] / 100, 2),
+            "tp": r["trades_placed"] or 0,
+            "ms": r["markets_scanned"] or 0,
+            "ms_dur": r["duration_ms"] or 0,
+        }
+        for r in reversed(rows)
+    ]
+
+
+def get_daily_stats() -> list[dict]:
+    """Daily aggregated trade stats."""
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT
+                DATE(timestamp) as day,
+                COUNT(*) as trades,
+                SUM(CASE WHEN result_status='won' THEN 1 ELSE 0 END) as won,
+                SUM(CASE WHEN result_status='lost' THEN 1 ELSE 0 END) as lost,
+                SUM(COALESCE(pnl_cents,0)) as pnl,
+                COALESCE(SUM(cost_cents),0) as cost
+            FROM trades
+            GROUP BY DATE(timestamp)
+            ORDER BY day
+        """).fetchall()
+    result = []
+    for r in rows:
+        settled = (r["won"] or 0) + (r["lost"] or 0)
+        result.append({
+            "day":      r["day"],
+            "trades":   r["trades"],
+            "won":      r["won"] or 0,
+            "lost":     r["lost"] or 0,
+            "pnl_usd":  round((r["pnl"] or 0) / 100, 2),
+            "cost_usd": round((r["cost"] or 0) / 100, 2),
+            "win_rate": round((r["won"] or 0) / settled * 100, 1) if settled > 0 else 0,
+        })
+    return result
+
+
+def get_hourly_distribution() -> list[dict]:
+    """Trades per hour of day (0-23) for activity heatmap."""
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT
+                CAST(strftime('%H', timestamp) AS INTEGER) as hour,
+                COUNT(*) as trades,
+                SUM(CASE WHEN result_status='won' THEN 1 ELSE 0 END) as won
+            FROM trades
+            GROUP BY hour
+            ORDER BY hour
+        """).fetchall()
+    result = [{"hour": h, "trades": 0, "won": 0, "win_rate": 0} for h in range(24)]
+    for r in rows:
+        settled = (r["won"] or 0) + (r["trades"] - (r["won"] or 0))
+        result[r["hour"]] = {
+            "hour":     r["hour"],
+            "trades":   r["trades"],
+            "won":      r["won"] or 0,
+            "win_rate": round((r["won"] or 0) / r["trades"] * 100, 1) if r["trades"] > 0 else 0,
+        }
+    return result
+
+
+def get_cycle_hourly_distribution() -> list[dict]:
+    """Cycle activity per hour of day (0-23)."""
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT
+                CAST(strftime('%H', timestamp) AS INTEGER) as hour,
+                COUNT(*) as cycles,
+                SUM(trades_placed) as trades_placed
+            FROM cycles
+            GROUP BY hour
+            ORDER BY hour
+        """).fetchall()
+    result = [{"hour": h, "cycles": 0, "trades_placed": 0} for h in range(24)]
+    for r in rows:
+        result[r["hour"]] = {
+            "hour":          r["hour"],
+            "cycles":        r["cycles"],
+            "trades_placed": r["trades_placed"] or 0,
+        }
+    return result
 
 
 # ── Migration ──────────────────────────────────────────────────────────────────

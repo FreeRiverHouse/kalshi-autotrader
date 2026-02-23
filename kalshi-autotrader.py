@@ -128,7 +128,62 @@ VIRTUAL_BALANCE = 100.0  # Virtual balance for paper mode when real balance < $1
 # BUY_NO: 76% WR overall → low bar.  BUY_YES: 19% WR overall → high bar.
 MIN_EDGE_BUY_NO  = 0.02   # 2% min for BUY_NO  (paper mode: collect data aggressively)
 MIN_EDGE_BUY_YES = 0.04   # 4% min for BUY_YES (lowered for data collection in paper mode)
-CALIBRATION_FACTOR = 0.65  # Shrink LLM/heuristic probs toward 50% to correct overconfidence
+CALIBRATION_FACTOR = 0.65  # baseline; overridden dynamically
+
+
+def _compute_dynamic_calibration_factor(
+    trade_history: list,
+    window: int = 30,
+    min_trades: int = 10,
+    factor_min: float = 0.5,
+    factor_max: float = 0.8,
+    baseline: float = 0.65,
+) -> float:
+    """Rolling backtest over last `window` closed trades to adapt CALIBRATION_FACTOR.
+
+    Logic:
+        - Collects the last `window` trades that have a recorded outcome
+          (resolved_prob vs predicted_prob).
+        - Computes mean signed error: error = resolved - predicted.
+        - If LLM is systematically over-confident (predicted > resolved),
+          error < 0 → shrink factor (be more conservative).
+        - If LLM is under-confident, error > 0 → increase factor.
+        - Adjustment is proportional but clamped to [factor_min, factor_max].
+    """
+    if len(trade_history) < min_trades:
+        return baseline
+
+    recent = [
+        t for t in trade_history
+        if t.get("predicted_prob") is not None and t.get("resolved_prob") is not None
+    ][-window:]
+
+    if len(recent) < min_trades:
+        return baseline
+
+    errors = [
+        t["resolved_prob"] - t["predicted_prob"]
+        for t in recent
+    ]
+    mean_error = sum(errors) / len(errors)
+
+    # Scale: each 0.1 mean error shifts factor by ~0.05
+    adjustment = mean_error * 0.5
+    new_factor = baseline + adjustment
+    new_factor = max(factor_min, min(factor_max, new_factor))
+
+    logging.getLogger(__name__).debug(
+        f"[CalibDynamic] window={len(recent)} mean_err={mean_error:.4f} "
+        f"factor={new_factor:.4f}"
+    )
+    return round(new_factor, 4)
+
+
+def get_calibration_factor(trade_history: list | None = None) -> float:
+    """Return dynamic CALIBRATION_FACTOR if enough history, else static baseline."""
+    if trade_history:
+        return _compute_dynamic_calibration_factor(trade_history)
+    return CALIBRATION_FACTOR  # Shrink LLM/heuristic probs toward 50% to correct overconfidence
                             # (Grok: predicted 71.5% → actual 46.2%, ratio ~0.65)
 MIN_EDGE = 0.02            # Global minimum (paper mode: more trades = more data)
 MAX_EDGE_CAP = 0.10        # Cap edges >10% (overconfident forecaster at >10%: 0% WR)

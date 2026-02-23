@@ -158,6 +158,22 @@ def api_status():
 def api_config():
     return jsonify(get_config_params())
 
+@app.route("/api/cycle_series")
+def api_cycle_series():
+    return jsonify(_db.get_cycle_series())
+
+@app.route("/api/daily_stats")
+def api_daily_stats():
+    return jsonify(_db.get_daily_stats())
+
+@app.route("/api/hourly_distribution")
+def api_hourly_distribution():
+    return jsonify(_db.get_hourly_distribution())
+
+@app.route("/api/cycle_hourly")
+def api_cycle_hourly():
+    return jsonify(_db.get_cycle_hourly_distribution())
+
 # ── HTML Dashboard ─────────────────────────────────────────────────────────────
 
 HTML = r"""<!DOCTYPE html>
@@ -409,6 +425,27 @@ body::after{
     <div class="card cc"><div class="ct">Trades per Giorno</div><div id="ch-daily"></div></div>
   </div>
 
+  <!-- TIME SERIES SECTION -->
+  <div class="sec">Andamento nel Tempo</div>
+
+  <!-- Balance from cycles (most granular) -->
+  <div class="card cc" style="margin-bottom:.9rem">
+    <div class="ct">Bankroll per Ciclo (ogni 5 min)</div>
+    <div id="ch-cycle-balance"></div>
+  </div>
+
+  <!-- Daily P&L + Win Rate -->
+  <div class="cg2">
+    <div class="card cc"><div class="ct">P&L per Giorno ($)</div><div id="ch-daily-pnl"></div></div>
+    <div class="card cc"><div class="ct">Win Rate per Giorno (%)</div><div id="ch-daily-wr"></div></div>
+  </div>
+
+  <!-- Hourly distribution -->
+  <div class="cg2">
+    <div class="card cc"><div class="ct">Attività per Ora del Giorno (cicli)</div><div id="ch-hour-cycles"></div></div>
+    <div class="card cc"><div class="ct">Trade Piazzati per Ora</div><div id="ch-hour-trades"></div></div>
+  </div>
+
   <!-- CONFIG PARAMS -->
   <div class="sec">Parametri Algo Attivi</div>
   <div class="card" style="padding:1.15rem;margin-bottom:.9rem">
@@ -470,6 +507,7 @@ function dash(){
        avg_edge:0,net_pnl_usd:0,gross_profit_usd:0,gross_loss_usd:0,
        bankroll_series:[],by_category:{},trader_pid:null},
     trades:[],roi:[],cfg:{},upd:'—',_ch:{},
+    cycles:[],daily:[],hourly:[],cycleHourly:[],
 
     init(){ this.refresh(); setInterval(()=>this.refresh(),30000); },
 
@@ -481,13 +519,19 @@ function dash(){
 
     async refresh(){
       try{
-        const [m,roi,tr,cfg]=await Promise.all([
+        const [m,roi,tr,cfg,cycles,daily,hourly,cycleHourly]=await Promise.all([
           fetch('/api/metrics').then(r=>r.json()),
           fetch('/api/roi_series').then(r=>r.json()),
           fetch('/api/trades').then(r=>r.json()),
           fetch('/api/config').then(r=>r.json()),
+          fetch('/api/cycle_series').then(r=>r.json()),
+          fetch('/api/daily_stats').then(r=>r.json()),
+          fetch('/api/hourly_distribution').then(r=>r.json()),
+          fetch('/api/cycle_hourly').then(r=>r.json()),
         ]);
         this.m=m; this.roi=roi; this.trades=tr; this.cfg=cfg;
+        this.cycles=cycles; this.daily=daily;
+        this.hourly=hourly; this.cycleHourly=cycleHourly;
         this.upd=new Date().toLocaleTimeString('it-IT');
         this.$nextTick(()=>this.charts());
       }catch(e){console.error(e)}
@@ -518,6 +562,7 @@ function dash(){
 
     charts(){
       const m=this.m,roi=this.roi,tr=this.trades,b=this.base();
+      const cycles=this.cycles,daily=this.daily,hourly=this.hourly,ch=this.cycleHourly;
 
       /* Bankroll */
       const bk=m.bankroll_series&&m.bankroll_series.length?m.bankroll_series:
@@ -589,6 +634,125 @@ function dash(){
           xaxis:{...b.xaxis,categories:days.map(d=>d.slice(5))},
           colors:['#f59e0b'],plotOptions:{bar:{borderRadius:4}},legend:{show:false},
         });
+      }
+
+      /* ── TIME SERIES CHARTS ─────────────────────────────── */
+
+      /* Balance from cycles (per-cycle granularity) */
+      if(cycles&&cycles.length){
+        const N=cycles.length;
+        // x-axis: abbreviated time label based on span
+        const first=new Date(cycles[0].t.replace(' ','T')+'Z');
+        const last=new Date(cycles[N-1].t.replace(' ','T')+'Z');
+        const spanH=(last-first)/3600000;
+        const fmt=t=>{
+          const d=new Date(t.replace(' ','T')+'Z');
+          if(spanH<=6) return d.toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit',timeZone:'UTC'});
+          if(spanH<=48) return d.toLocaleString('it-IT',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'UTC'});
+          return d.toLocaleDateString('it-IT',{month:'2-digit',day:'2-digit',timeZone:'UTC'});
+        };
+        const cycleLabels=cycles.map(c=>fmt(c.t));
+        const balData=cycles.map(c=>({x:fmt(c.t),y:c.b}));
+        const tpData=cycles.map(c=>c.tp);
+        this.mk('ch-cycle-balance',{...b,
+          chart:{...b.chart,type:'area',height:240},
+          series:[{name:'Bankroll ($)',data:balData}],
+          stroke:{curve:'smooth',width:2},
+          fill:{type:'gradient',gradient:{shadeIntensity:1,opacityFrom:.45,opacityTo:.04,stops:[0,100]}},
+          colors:['#8b5cf6'],
+          markers:{size:N<60?3:0,colors:['#8b5cf6'],strokeWidth:0},
+          yaxis:{...b.yaxis,labels:{...b.yaxis.labels,formatter:v=>'$'+v.toFixed(2)}},
+          xaxis:{...b.xaxis,type:'category',tickAmount:Math.min(N,16),
+                 labels:{...b.xaxis.labels,rotate:-30,maxHeight:60,
+                         formatter:(v,i)=>{
+                           if(N<=20)return v;
+                           const step=Math.floor(N/12)||1;
+                           return cycleLabels.indexOf(v)%step===0?v:'';
+                         }}},
+          tooltip:{y:{formatter:v=>'$'+v.toFixed(2)},x:{show:true}},
+          annotations:{yaxis:[{
+            y:m.starting_balance_usd,
+            borderColor:'#f59e0b',strokeDashArray:5,
+            label:{text:'Start $'+m.starting_balance_usd.toFixed(0),
+                   style:{background:'rgba(245,158,11,.15)',color:'#f59e0b',fontSize:'10px'}}
+          }]},
+        });
+      }
+
+      /* Daily P&L */
+      if(daily&&daily.length){
+        this.mk('ch-daily-pnl',{...b,
+          chart:{...b.chart,type:'bar',height:220},
+          series:[{name:'P&L ($)',data:daily.map(d=>d.pnl_usd)}],
+          xaxis:{...b.xaxis,categories:daily.map(d=>d.day.slice(5))},
+          colors:daily.map(d=>d.pnl_usd>=0?'#10b981':'#ef4444'),
+          plotOptions:{bar:{borderRadius:5,distributed:true,
+            colors:{ranges:[{from:-9999,to:-0.001,color:'#ef4444'},{from:0,to:9999,color:'#10b981'}]}}},
+          legend:{show:false},
+          yaxis:{...b.yaxis,labels:{...b.yaxis.labels,formatter:v=>(v>=0?'+':'')+v.toFixed(2)}},
+          annotations:{yaxis:[{y:0,borderColor:this.dark?'#334155':'#cbd5e1',strokeDashArray:3}]},
+        });
+      }
+
+      /* Daily Win Rate */
+      if(daily&&daily.length){
+        const dwr=daily.filter(d=>d.won+d.lost>0);
+        if(dwr.length){
+          this.mk('ch-daily-wr',{...b,
+            chart:{...b.chart,type:'line',height:220},
+            series:[
+              {name:'Win Rate %',data:dwr.map(d=>d.win_rate),type:'line'},
+              {name:'Trades',data:dwr.map(d=>d.trades),type:'bar'},
+            ],
+            xaxis:{...b.xaxis,categories:dwr.map(d=>d.day.slice(5))},
+            colors:['#06b6d4','#8b5cf6'],
+            stroke:{curve:'smooth',width:[2,0]},
+            plotOptions:{bar:{borderRadius:4,columnWidth:'55%'}},
+            yaxis:[
+              {...b.yaxis,max:100,labels:{...b.yaxis.labels,formatter:v=>v+'%'}},
+              {opposite:true,labels:{style:{colors:this.dark?'#64748b':'#94a3b8',fontSize:'10px'},formatter:v=>v+'t'}},
+            ],
+            annotations:{yaxis:[{y:50,borderColor:'#f59e0b',strokeDashArray:4,
+              label:{text:'50%',style:{background:'rgba(245,158,11,.15)',color:'#f59e0b',fontSize:'9px'}}}]},
+          });
+        }
+      }
+
+      /* Hourly cycle distribution */
+      if(ch&&ch.length){
+        const active=ch.filter(h=>h.cycles>0);
+        if(active.length){
+          const maxC=Math.max(...ch.map(h=>h.cycles),1);
+          this.mk('ch-hour-cycles',{...b,
+            chart:{...b.chart,type:'bar',height:220},
+            series:[{name:'Cicli',data:ch.map(h=>h.cycles)}],
+            xaxis:{...b.xaxis,categories:ch.map(h=>h.hour+':00')},
+            colors:ch.map(h=>{const i=h.cycles/maxC;return `rgba(6,182,212,${0.2+i*0.8})`;}),
+            plotOptions:{bar:{borderRadius:4,distributed:true}},
+            legend:{show:false},
+            tooltip:{y:{formatter:v=>v+' cicli'}},
+          });
+        }
+      }
+
+      /* Hourly trade distribution */
+      if(hourly&&hourly.length){
+        const maxT=Math.max(...hourly.map(h=>h.trades),1);
+        const hasAny=hourly.some(h=>h.trades>0);
+        if(hasAny){
+          this.mk('ch-hour-trades',{...b,
+            chart:{...b.chart,type:'bar',height:220},
+            series:[{name:'Trade',data:hourly.map(h=>h.trades)}],
+            xaxis:{...b.xaxis,categories:hourly.map(h=>h.hour+':00')},
+            colors:hourly.map(h=>{const i=h.trades/maxT;return `rgba(139,92,246,${0.2+i*0.8})`;}),
+            plotOptions:{bar:{borderRadius:4,distributed:true}},
+            legend:{show:false},
+            tooltip:{y:{formatter:(v,{dataPointIndex:i})=>{
+              const h=hourly[i];
+              return v+' trade'+(h.win_rate>0?' | WR '+h.win_rate+'%':'');
+            }}},
+          });
+        }
       }
     },
   };
