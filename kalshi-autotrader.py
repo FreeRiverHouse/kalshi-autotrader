@@ -223,6 +223,7 @@ PROFIT_TAKE_PCT = 0.30       # Take profit when position is +30% (e.g., bought N
 TRAILING_STOP_PCT = 0.15     # Trail by 15% from peak unrealized profit
 MIN_PROFIT_TO_TRAIL = 0.10   # Start trailing only after +10% unrealized
 EARLY_EXIT_NEAR_EXPIRY_HOURS = 2  # Force exit if <2h to expiry and in profit
+HARD_STOP_LOSS_PCT = -0.30   # Hard stop: exit if position is -30% or worse
 
 # ── Market scanning filters ──
 MIN_VOLUME = 200
@@ -995,12 +996,17 @@ def manage_positions(positions: list, dry_run: bool = True) -> int:
             should_exit = True
             exit_reason = f"TAKE_PROFIT +{unrealized_pnl_ratio:.0%} (threshold: {PROFIT_TAKE_PCT:.0%})"
 
-        # 2. Trailing stop: peaked above +10%, now dropped 15% from peak
+        # 2. Hard stop-loss: position is -30% or worse
+        elif unrealized_pnl_ratio <= HARD_STOP_LOSS_PCT:
+            should_exit = True
+            exit_reason = f"STOP_LOSS {unrealized_pnl_ratio:.0%} (limit: {HARD_STOP_LOSS_PCT:.0%})"
+
+        # 3. Trailing stop: peaked above +10%, now dropped 15% from peak
         elif peak >= MIN_PROFIT_TO_TRAIL and (peak - unrealized_pnl_ratio) >= TRAILING_STOP_PCT:
             should_exit = True
             exit_reason = f"TRAILING_STOP peak={peak:.0%} current={unrealized_pnl_ratio:.0%} drop={peak-unrealized_pnl_ratio:.0%}"
 
-        # 3. Early exit near expiry: <2h to expiry and in any profit
+        # 4. Early exit near expiry: <2h to expiry and in any profit
         elif hours_to_expiry < EARLY_EXIT_NEAR_EXPIRY_HOURS and unrealized_pnl_ratio > 0.01:
             should_exit = True
             exit_reason = f"EARLY_EXIT {hours_to_expiry:.1f}h to expiry, +{unrealized_pnl_ratio:.0%} profit"
