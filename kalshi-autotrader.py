@@ -1450,14 +1450,17 @@ For crypto price markets, reason through:
 1. Current price vs target: how much % move is required?
 2. Time until expiry: more time = more uncertainty
 3. Volatility and momentum: what direction is the market moving?
-4. Give your honest base probability estimate based on price gap, time, and momentum only.
-   Do NOT apply specific multipliers or numerical discounts — just give your best estimate.
+4. Give your honest BASE probability estimate based on price gap, time, and momentum ONLY.
+   IMPORTANT: Do NOT apply Fear & Greed multipliers or sentiment discounts in your estimate.
+   The trading system applies regime adjustments automatically in Python after your call.
+   If you apply F&G discounts yourself, they will be double-counted and create incorrect signals.
 
 Rules:
 - Current price already ABOVE target → high YES probability
 - Current price far BELOW target → low YES probability
 - <6 hours to expiry: probability should reflect current state strongly (>75% or <25%)
-- Provide an honest estimate; the system will apply risk adjustments separately
+- The Fear & Greed index is provided as context only — do NOT use it as a multiplier
+- Output a raw probability based purely on price/time/momentum math
 
 End with:
 PROBABILITY: XX%
@@ -1489,10 +1492,7 @@ KEY_FACTORS: [factor1], [factor2], [factor3]"""
         if context.get("sentiment"):
             s = context["sentiment"]
             extra_context += f"\nFear & Greed Index: {s.get('value', 50)} ({s.get('classification', 'Neutral')})"
-            if s.get('value', 50) < 20:
-                extra_context += "  ⚠️ EXTREME FEAR — discount all crypto UP moves heavily"
-            elif s.get('value', 50) < 35:
-                extra_context += "  ⚠️ FEAR — be skeptical of crypto UP bets"
+            # NOTE: Do NOT add discount instructions here — Python applies regime discounts automatically
         if context.get("news_sentiment"):
             ns = context["news_sentiment"]
             extra_context += f"\nCrypto news sentiment: {ns.get('sentiment', 'neutral')} (conf: {ns.get('confidence', 0.5):.0%})"
@@ -1621,12 +1621,18 @@ def critique_forecast_llm(market: MarketInfo, forecast: ForecastResult) -> Criti
 Your job: catch SEVERE errors only. Minor uncertainty or suboptimal analysis is acceptable.
 
 ONLY mark SHOULD_TRADE: no for these CRITICAL issues:
-- The forecaster's final probability directly contradicts its own reasoning (e.g., says "very unlikely" then outputs 60%)
-- Wrong direction: forecaster recommends BUY_YES but the bet should be BUY_NO based on price gap
+- The forecaster's final probability directly contradicts its own reasoning (e.g., says "10% likely" then outputs 60%)
+- Wrong direction: forecaster recommends BUY_YES but price gap clearly indicates BUY_NO
 - Gross hallucination: fabricated data, wrong current price by >10%, completely wrong event
 
-Do NOT veto for: slightly different probability estimates, methodological preferences, cautious wording, or minor inconsistencies.
-A trade with genuine edge (>5%) and correct direction should NOT be vetoed unless there is a CRITICAL error above.
+Do NOT veto for ANY of these (they are NOT flaws):
+- Fear & Greed discounts applied by the forecaster (Python handles regime adjustments separately)
+- Sentiment or momentum multipliers (0.4x, 0.5x, etc.) — these are intentional, do NOT flag
+- Methodological preferences or different estimation approaches
+- Cautious wording, hedge phrases, or minor numerical differences
+- Conservative probability estimates
+
+A trade with genuine edge (>5%) and correct direction should NOT be vetoed unless there is a CRITICAL directional error above.
 
 MAJOR_FLAWS should only list truly critical issues. If analysis is roughly reasonable, output MAJOR_FLAWS: NONE.
 
