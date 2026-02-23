@@ -211,7 +211,7 @@ MAX_NO_PRICE_CENTS = 80     # Hard cap: never buy NO above 80¢ (relaxed for pap
 NO_PRICE_EDGE_SCALE = True  # Scale min edge up with BUY_NO price
 # If NO price is 50-65¢, require edge >= 3% + 0.1% per cent above 50
 # e.g., 55¢ → 3.5% min edge, 60¢ → 4% min edge, 65¢ → 4.5%
-MAX_RISK_REWARD_RATIO = 1.5 # Skip if (cost / potential_win) > 1.5
+MAX_RISK_REWARD_RATIO = 5.0 # Skip if (cost / potential_win) > 5.0 (allows BUY_NO up to ~83¢)
 
 # ── Parlay strategy (from v3 data) ──
 PARLAY_ONLY_NO = True       # On multi-leg parlays, primarily take BUY_NO
@@ -1053,6 +1053,34 @@ def manage_positions(positions: list, dry_run: bool = True) -> int:
             # Clean up peak tracking
             _position_peaks.pop(ticker, None)
             exits += 1
+
+            # Update paper state: close position at exit price
+            try:
+                paper_state = load_paper_state()
+                for pos in paper_state.get("positions", []):
+                    if pos.get("ticker") == ticker and pos.get("status") == "open":
+                        pos["status"] = "exited"
+                        pos["exited_at"] = datetime.now(timezone.utc).isoformat()
+                        pos["exit_price_cents"] = int(sell_price)
+                        pos["exit_reason"] = exit_reason
+                        exit_proceeds = int(sell_price) * contracts
+                        cost_paid = pos.get("cost_cents", 0)
+                        pnl = exit_proceeds - cost_paid
+                        pos["pnl_cents"] = pnl
+                        paper_state["current_balance_cents"] += exit_proceeds
+                        paper_state["stats"]["pnl_cents"] = paper_state["stats"].get("pnl_cents", 0) + pnl
+                        if pnl >= 0:
+                            paper_state["stats"]["wins"] = paper_state["stats"].get("wins", 0) + 1
+                        else:
+                            paper_state["stats"]["losses"] = paper_state["stats"].get("losses", 0) + 1
+                        break
+                # Remove the exited position from active list
+                paper_state["positions"] = [p for p in paper_state["positions"]
+                                              if not (p.get("ticker") == ticker and p.get("status") == "exited")]
+                save_paper_state(paper_state)
+            except Exception as e_ps:
+                print(f"      ⚠️ Paper state update error: {e_ps}")
+
             time.sleep(0.5)  # Rate limit
         else:
             # Log status for monitoring
@@ -1406,15 +1434,26 @@ def parse_probability(text: str) -> Optional[float]:
 
 def forecast_market_llm(market: MarketInfo, context: dict = None) -> ForecastResult:
     """Use Claude to estimate true probability (v3 pipeline)."""
-    system_prompt = """You are an expert forecaster for prediction markets. Estimate the TRUE probability of events.
+    system_prompt = """You are an expert quantitative forecaster for prediction markets.
+Your job: estimate the BASE probability an event resolves YES. Be objective and calibrated.
+
+TICKER FORMAT: KXBTCD-26FEB2717-T66999.99 = "BTC price on 2026-Feb-27 at 17:00 UTC, target $66,999.99".
+Use the EXPIRY field — it is the definitive resolution time.
+
+For crypto price markets, reason through:
+1. Current price vs target: how much % move is required?
+2. Time until expiry: more time = more uncertainty
+3. Volatility and momentum: what direction is the market moving?
+4. Give your honest base probability estimate based on price gap, time, and momentum only.
+   Do NOT apply specific multipliers or numerical discounts — just give your best estimate.
 
 Rules:
-1. Think step by step about base rates, current conditions, and relevant factors
-2. Be calibrated - if uncertain, reflect that in your probability
-3. Consider time remaining until expiry
-4. Account for both sides
+- Current price already ABOVE target → high YES probability
+- Current price far BELOW target → low YES probability
+- <6 hours to expiry: probability should reflect current state strongly (>75% or <25%)
+- Provide an honest estimate; the system will apply risk adjustments separately
 
-End your response with exactly:
+End with:
 PROBABILITY: XX%
 CONFIDENCE: [low/medium/high]
 KEY_FACTORS: [factor1], [factor2], [factor3]"""
@@ -1435,37 +1474,63 @@ KEY_FACTORS: [factor1], [factor2], [factor3]"""
 
     # Build context from v2 signals if available
     extra_context = ""
+    crypto_prices = {}
     if context:
         if context.get("crypto_prices"):
-            extra_context += f"\nCurrent crypto prices: BTC ${context['crypto_prices'].get('btc', 0):,.0f}, ETH ${context['crypto_prices'].get('eth', 0):,.0f}"
+            cp = context["crypto_prices"]
+            crypto_prices = cp
+            extra_context += f"\nCurrent crypto prices: BTC ${cp.get('btc', 0):,.0f}, ETH ${cp.get('eth', 0):,.2f}"
         if context.get("sentiment"):
             s = context["sentiment"]
             extra_context += f"\nFear & Greed Index: {s.get('value', 50)} ({s.get('classification', 'Neutral')})"
+            if s.get('value', 50) < 20:
+                extra_context += "  ⚠️ EXTREME FEAR — discount all crypto UP moves heavily"
+            elif s.get('value', 50) < 35:
+                extra_context += "  ⚠️ FEAR — be skeptical of crypto UP bets"
         if context.get("news_sentiment"):
             ns = context["news_sentiment"]
             extra_context += f"\nCrypto news sentiment: {ns.get('sentiment', 'neutral')} (conf: {ns.get('confidence', 0.5):.0%})"
         if context.get("momentum"):
             m = context["momentum"]
-            extra_context += f"\nMomentum: composite_dir={m.get('composite_direction', 0):.2f}, aligned={m.get('alignment', False)}"
+            extra_context += f"\nMomentum: BTC dir={m.get('btc_direction', 0):.2f}, ETH dir={m.get('eth_direction', 0):.2f}"
         if context.get("regime"):
             r = context["regime"]
-            extra_context += f"\nMarket regime: {r.get('regime', 'unknown')} (conf: {r.get('confidence', 0):.0%}), vol: {r.get('volatility', 'normal')}"
+            extra_context += f"\nMarket regime: {r.get('regime', 'unknown')} ({r.get('confidence', 0):.0%} conf), vol: {r.get('volatility', 'normal')}"
+
+    # For crypto price markets: calculate the gap between current and target
+    price_gap_note = ""
+    if crypto_prices and market.category in ("crypto", "cryptocurrency"):
+        ticker_upper = market.ticker.upper()
+        current = 0
+        if "BTC" in ticker_upper:
+            current = crypto_prices.get("btc", 0)
+        elif "ETH" in ticker_upper:
+            current = crypto_prices.get("eth", 0)
+        if current > 0:
+            import re as _re
+            nums = _re.findall(r'[\d,]+\.?\d*', market.title.replace(',', ''))
+            targets = [float(n.replace(',', '')) for n in nums if float(n.replace(',', '')) > 100]
+            if targets:
+                target = max(targets)
+                gap_pct = (target - current) / current * 100
+                direction = "above" if "above" in market.title.lower() or "over" in market.title.lower() else "below"
+                price_gap_note = f"\n⚡ PRICE GAP: current=${current:,.2f}, target=${target:,.0f}, gap={gap_pct:+.1f}% ({'UP' if gap_pct>0 else 'DOWN'} needed for YES/{direction})"
 
     user_prompt = f"""Analyze this prediction market and estimate the true probability:
 
 MARKET: {market.title}
 {f'DETAILS: {market.subtitle}' if market.subtitle else ''}
 CATEGORY: {market.category}
-YES PRICE: {market.yes_price}¢ (implies {market.market_prob:.0%})
+YES PRICE: {market.yes_price}¢ (market implies {market.market_prob:.0%} probability)
 NO PRICE: {market.no_price}¢
 VOLUME: {market.volume:,} contracts
 EXPIRY: {expiry_str} ({time_desc} remaining)
 TICKER: {market.ticker}
-{extra_context}
+{extra_context}{price_gap_note}
 
 Today: {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}
 
-What is the TRUE probability this resolves YES?"""
+What is the TRUE probability this resolves YES? Be specific about price levels and realistic about required moves."""
 
     result = call_claude(system_prompt, user_prompt, max_tokens=1500)
 
@@ -1475,9 +1540,61 @@ What is the TRUE probability this resolves YES?"""
 
     content = result["content"]
     raw_prob = parse_probability(content) or market.market_prob
-    # Apply calibration: shrink toward 50% to correct LLM overconfidence
-    prob = 0.5 + (raw_prob - 0.5) * CALIBRATION_FACTOR
-    prob = max(0.05, min(0.95, prob))
+
+    # Apply calibration: direction depends on market_prob
+    # For unlikely events (<30%): calibrate toward 0 (LLM overestimates tail risk)
+    # For likely events (>70%): calibrate toward 1 (LLM underestimates near-certainty)
+    # For middle range: shrink toward 50% (standard overconfidence correction)
+    if market.market_prob < 0.30:
+        prob = raw_prob * CALIBRATION_FACTOR  # compress toward 0%
+    elif market.market_prob > 0.70:
+        prob = 1.0 - (1.0 - raw_prob) * CALIBRATION_FACTOR  # compress toward 100%
+    else:
+        prob = 0.5 + (raw_prob - 0.5) * CALIBRATION_FACTOR  # compress toward 50%
+    prob = max(0.03, min(0.97, prob))
+
+    # Apply regime discounts algorithmically (not via LLM prompt)
+    if context and market.category in ("crypto", "cryptocurrency"):
+        # Sentiment discount for crypto UP moves
+        fear_val = 50
+        if context.get("sentiment"):
+            fear_val = context["sentiment"].get("value", 50)
+
+        # Determine if this is an "UP move" market (YES = price goes up)
+        is_up_market = False
+        gap_pct = 0.0
+        ticker_upper = market.ticker.upper()
+        current_price = 0.0
+        if "BTC" in ticker_upper:
+            current_price = context.get("crypto_prices", {}).get("btc", 0)
+        elif "ETH" in ticker_upper:
+            current_price = context.get("crypto_prices", {}).get("eth", 0)
+        if current_price > 0:
+            import re as _re2
+            nums = _re2.findall(r'[\d,]+\.?\d*', market.title.replace(',', ''))
+            targets = [float(n.replace(',', '')) for n in nums if float(n.replace(',', '')) > 100]
+            if targets:
+                target_price = max(targets)
+                gap_pct = (target_price - current_price) / current_price * 100
+                is_up_market = gap_pct > 0  # YES requires upward move
+
+        if is_up_market and gap_pct > 0.5:  # Only apply for genuine up-moves (>0.5%)
+            if fear_val < 20:    # Extreme Fear: big discount
+                regime_discount = 0.5
+            elif fear_val < 35:  # Fear: moderate discount
+                regime_discount = 0.7
+            else:
+                regime_discount = 1.0
+            # Also apply bearish momentum discount
+            if context.get("momentum"):
+                btc_dir = context["momentum"].get("btc_direction", 0)
+                eth_dir = context["momentum"].get("eth_direction", 0)
+                if "BTC" in ticker_upper and btc_dir < -0.3:
+                    regime_discount *= 0.85
+                elif "ETH" in ticker_upper and eth_dir < -0.3:
+                    regime_discount *= 0.85
+            if regime_discount < 1.0:
+                prob = max(0.05, prob * regime_discount)
     confidence = "medium"
     conf_match = re.search(r'CONFIDENCE:\s*(low|medium|high)', content, re.IGNORECASE)
     if conf_match:
@@ -1494,11 +1611,22 @@ What is the TRUE probability this resolves YES?"""
 
 def critique_forecast_llm(market: MarketInfo, forecast: ForecastResult) -> CriticResult:
     """Second LLM call to critically evaluate the forecast (v3 pipeline)."""
-    system_prompt = """You are a critical analyst reviewing probability forecasts. Find flaws, missing context, overconfidence.
+    system_prompt = """You are a critical analyst reviewing probability forecasts for prediction markets.
+Your job: catch SEVERE errors only. Minor uncertainty or suboptimal analysis is acceptable.
+
+ONLY mark SHOULD_TRADE: no for these CRITICAL issues:
+- The forecaster's final probability directly contradicts its own reasoning (e.g., says "very unlikely" then outputs 60%)
+- Wrong direction: forecaster recommends BUY_YES but the bet should be BUY_NO based on price gap
+- Gross hallucination: fabricated data, wrong current price by >10%, completely wrong event
+
+Do NOT veto for: slightly different probability estimates, methodological preferences, cautious wording, or minor inconsistencies.
+A trade with genuine edge (>5%) and correct direction should NOT be vetoed unless there is a CRITICAL error above.
+
+MAJOR_FLAWS should only list truly critical issues. If analysis is roughly reasonable, output MAJOR_FLAWS: NONE.
 
 End with:
 ADJUSTED_PROBABILITY: XX%
-MAJOR_FLAWS: [flaw1], [flaw2] (or NONE)
+MAJOR_FLAWS: [critical_flaw1] (or NONE)
 SHOULD_TRADE: [yes/no]"""
 
     edge = forecast.probability - market.market_prob
@@ -1522,9 +1650,14 @@ Is the forecaster overconfident? Missing factors? Is the edge real?"""
 
     content = result["content"]
     raw_adj = parse_probability(content) or forecast.probability
-    # Apply same calibration to critic's adjusted probability
-    adj_prob = 0.5 + (raw_adj - 0.5) * CALIBRATION_FACTOR
-    adj_prob = max(0.05, min(0.95, adj_prob))
+    # Apply calibration (same direction-aware formula as forecaster)
+    if market.market_prob < 0.30:
+        adj_prob = raw_adj * CALIBRATION_FACTOR
+    elif market.market_prob > 0.70:
+        adj_prob = 1.0 - (1.0 - raw_adj) * CALIBRATION_FACTOR
+    else:
+        adj_prob = 0.5 + (raw_adj - 0.5) * CALIBRATION_FACTOR
+    adj_prob = max(0.03, min(0.97, adj_prob))
     major_flaws = []
     flaws_match = re.search(r'MAJOR_FLAWS:\s*(.+)', content, re.IGNORECASE)
     if flaws_match:
@@ -1535,6 +1668,9 @@ Is the forecaster overconfident? Missing factors? Is the edge real?"""
     trade_match = re.search(r'SHOULD_TRADE:\s*(yes|no)', content, re.IGNORECASE)
     if trade_match:
         should_trade = trade_match.group(1).lower() == "yes"
+    # If no major flaws found, override SHOULD_TRADE to True (can't veto without evidence)
+    if not major_flaws:
+        should_trade = True
 
     return CriticResult(adjusted_probability=adj_prob, major_flaws=major_flaws,
                         should_trade=should_trade, reasoning=content,
@@ -1970,21 +2106,22 @@ def make_trade_decision(market: MarketInfo, forecast: ForecastResult, critic: Cr
     """Compare probability vs market price and decide. Uses split thresholds (v3 data-driven)."""
     final_prob = 0.6 * forecast.probability + 0.4 * critic.adjusted_probability
 
-    # PROC-002 Task 6.2: Overconfidence decay — shrink toward 50% for markets closing >72h out
-    # (Grok review: 48h too aggressive, raised to 72h — still catches long-term overconfidence)
+    # Overconfidence decay: shrink toward 50% for BUY_YES on markets >72h out only
+    # (BUY_NO direction: NO decay — in bearish regime, long-dated NO is actually MORE certain)
     try:
         close_str = getattr(market, 'expiry', '') or ''
         if close_str:
             close_dt = datetime.fromisoformat(close_str.replace("Z", "+00:00"))
             hours_to_close = (close_dt - datetime.now(timezone.utc)).total_seconds() / 3600
-            if hours_to_close > 72:
-                decay_rate = 0.003  # -0.3% per hour past 72h
-                decay_hours = min(hours_to_close - 72, 200)  # cap at 200h extra
+            if hours_to_close > 72 and final_prob > market.market_prob:
+                # Only apply decay for BUY_YES (final_prob > market = YES looks underpriced)
+                decay_rate = 0.002  # -0.2% per hour past 72h (reduced from 0.3%)
+                decay_hours = min(hours_to_close - 72, 200)
                 decay = decay_rate * decay_hours
-                final_prob = final_prob * (1 - decay) + 0.5 * decay  # shrink toward 50%
+                final_prob = final_prob * (1 - decay) + 0.5 * decay
                 final_prob = max(0.01, min(0.99, final_prob))
     except Exception:
-        pass  # Don't break on parsing errors
+        pass
     market_prob = market.market_prob
     edge_yes = final_prob - market_prob
     
@@ -2022,7 +2159,8 @@ def make_trade_decision(market: MarketInfo, forecast: ForecastResult, critic: Cr
         return TradeDecision(action="SKIP", edge=edge_yes, kelly_size=0, contracts=0, price_cents=0,
                             reason=f"Critic vetoed: {', '.join(critic.major_flaws[:2]) or 'concerns'}",
                             forecast=forecast, critic=critic)
-    if len(critic.major_flaws) >= 2:
+    # Only block on 3+ critical flaws (critic now only lists truly critical ones)
+    if len(critic.major_flaws) >= 3:
         return TradeDecision(action="SKIP", edge=edge_yes, kelly_size=0, contracts=0, price_cents=0,
                             reason=f"Too many flaws: {', '.join(critic.major_flaws[:2])}",
                             forecast=forecast, critic=critic)
