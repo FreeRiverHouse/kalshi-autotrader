@@ -12,7 +12,9 @@ import os
 from pathlib import Path
 from datetime import datetime, timezone
 
-DB_PATH = Path(__file__).parent / "data" / "trading" / "trades.db"
+# Use SSD for DB if available, fallback to repo dir
+_SSD_DATA = Path("/Volumes/DATI-SSD/kalshi-logs")
+DB_PATH = (_SSD_DATA / "trades.db") if _SSD_DATA.exists() else Path(__file__).parent / "data" / "trading" / "trades.db"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS trades (

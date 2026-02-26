@@ -26,11 +26,14 @@ from pathlib import Path
 # ── Config ────────────────────────────────────────────────────────────────────
 
 BASE        = Path(__file__).parent
-DB_PATH     = BASE / "data" / "trading" / "trades.db"
-PAPER_STATE = BASE / "data" / "trading" / "paper-trade-state.json"
+# Use SSD for all data/logs if available (auto-detect), fallback to repo dir
+_SSD_DATA   = Path("/Volumes/DATI-SSD/kalshi-logs")
+_DATA_DIR   = _SSD_DATA if _SSD_DATA.exists() else BASE / "data" / "trading"
+DB_PATH     = _DATA_DIR / "trades.db"
+PAPER_STATE = _DATA_DIR / "paper-trade-state.json"
 TRADER_SCRIPT = BASE / "kalshi-autotrader.py"
 DASHBOARD_SCRIPT = BASE / "kalshi-dashboard.py"
-WATCHDOG_LOG = BASE / "data" / "trading" / "watchdog.log"
+WATCHDOG_LOG = _DATA_DIR / "watchdog.log"
 PYTHON      = "/opt/homebrew/bin/python3.11"
 DASHBOARD_URL = "http://localhost:8888"
 CLAUDE_MODEL  = "claude-sonnet-4-6"
@@ -162,9 +165,10 @@ def check_paper_state() -> dict:
 
 def restart_trader():
     log("Restarting trader…", "WARN")
+    _DATA_DIR.mkdir(parents=True, exist_ok=True)
     subprocess.Popen(
         [PYTHON, "-u", str(TRADER_SCRIPT), "--loop", "300"],
-        stdout=open(BASE / "data" / "trading" / "kalshi-autotrader.log", "a"),
+        stdout=open(_DATA_DIR / "kalshi-autotrader.log", "a"),
         stderr=subprocess.STDOUT,
         cwd=str(BASE),
     )
@@ -178,7 +182,7 @@ def restart_dashboard():
     log("Restarting dashboard…", "WARN")
     subprocess.Popen(
         [PYTHON, "-u", str(DASHBOARD_SCRIPT)],
-        stdout=open("/tmp/kalshi-dashboard.log", "a"),
+        stdout=open(_DATA_DIR / "kalshi-dashboard.log", "a"),
         stderr=subprocess.STDOUT,
         cwd=str(BASE),
     )
@@ -286,7 +290,7 @@ def main():
     log(f"Claude says:\n{analysis}")
 
     # ── Write JSON snapshot ────────────────────────────────────────────────────
-    snap_path = BASE / "data" / "trading" / "watchdog-last.json"
+    snap_path = _DATA_DIR / "watchdog-last.json"
     report["claude_analysis"] = analysis
     snap_path.write_text(json.dumps(report, indent=2, default=str))
 

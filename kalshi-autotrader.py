@@ -315,7 +315,9 @@ CRYPTO_FAT_TAIL_MULTIPLIER = 1.0  # Disabled after v2 disaster analysis
 
 # ── Logging paths ──
 PROJECT_ROOT = Path(__file__).parent  # Standalone repo: logs live inside the repo dir
-_DATA_DIR = PROJECT_ROOT / "data" / "trading"
+# Use SSD for all logs/data if available (auto-detect), fallback to repo dir
+_SSD_DATA = Path("/Volumes/DATI-SSD/kalshi-logs")
+_DATA_DIR = _SSD_DATA if _SSD_DATA.exists() else PROJECT_ROOT / "data" / "trading"
 TRADE_LOG_FILE = _DATA_DIR / "kalshi-unified-trades.jsonl"
 V3_TRADE_LOG   = _DATA_DIR / "kalshi-v3-trades.jsonl"
 CYCLE_LOG_FILE = _DATA_DIR / "kalshi-unified-cycles.jsonl"
