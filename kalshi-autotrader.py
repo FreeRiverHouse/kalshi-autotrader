@@ -3105,6 +3105,48 @@ def run_cycle(dry_run: bool = True, max_markets: int = 30, max_trades: int = 10)
     if settlement["updated"]:
         print(f"📊 Settled: {settlement['updated']} trades ({settlement['wins']}W/{settlement['losses']}L)")
 
+    # ── Adaptive parameter tuning ─────────────────────────────────────────────
+    # Runs every ADAPT_EVERY_N settled trades. Adjusts MIN_EDGE, CAL_FACTOR, KELLY
+    # based on rolling performance from SQLite. Safe: clamped to sane ranges.
+    try:
+        from adaptive import compute_adaptive_params, ADAPT_EVERY_N
+        global MIN_EDGE_BUY_YES, MIN_EDGE_BUY_NO
+        global CALIBRATION_FACTOR_YES, CALIBRATION_FACTOR_NO
+        global KELLY_FRACTION
+        metrics_snap = _db.get_metrics()
+        total_settled = metrics_snap.get("settled", 0)
+        if total_settled >= ADAPT_EVERY_N and total_settled % ADAPT_EVERY_N == 0:
+            adj = compute_adaptive_params({
+                "MIN_EDGE_BUY_YES":       MIN_EDGE_BUY_YES,
+                "MIN_EDGE_BUY_NO":        MIN_EDGE_BUY_NO,
+                "CALIBRATION_FACTOR_YES": CALIBRATION_FACTOR_YES,
+                "CALIBRATION_FACTOR_NO":  CALIBRATION_FACTOR_NO,
+                "KELLY_FRACTION":         KELLY_FRACTION,
+            })
+            if not adj.get("_meta", {}).get("skipped"):
+                MIN_EDGE_BUY_YES       = adj["MIN_EDGE_BUY_YES"]
+                MIN_EDGE_BUY_NO        = adj["MIN_EDGE_BUY_NO"]
+                CALIBRATION_FACTOR_YES = adj["CALIBRATION_FACTOR_YES"]
+                CALIBRATION_FACTOR_NO  = adj["CALIBRATION_FACTOR_NO"]
+                KELLY_FRACTION         = adj["KELLY_FRACTION"]
+                meta = adj["_meta"]
+                structured_log("adaptive_tuning", {
+                    "settled": total_settled,
+                    "yes_wr": meta.get("yes_wr"),
+                    "no_wr": meta.get("no_wr"),
+                    "profit_factor": meta.get("profit_factor"),
+                    "params": {k: adj[k] for k in adj if not k.startswith("_")},
+                    "reasons": meta.get("reasons", {}),
+                })
+                print(f"🔧 Adaptive tuning @ {total_settled} settled: "
+                      f"MIN_YES={MIN_EDGE_BUY_YES:.1%} MIN_NO={MIN_EDGE_BUY_NO:.1%} "
+                      f"CAL_YES={CALIBRATION_FACTOR_YES:.2f} CAL_NO={CALIBRATION_FACTOR_NO:.2f} "
+                      f"KELLY={KELLY_FRACTION:.2f} | "
+                      f"WR YES={meta.get('yes_wr')}% NO={meta.get('no_wr')}% "
+                      f"PF={meta.get('profit_factor'):.2f}")
+    except Exception as _e:
+        print(f"⚠️  Adaptive tuning error (non-fatal): {_e}")
+
     # ── Circuit breaker ── (skip in paper mode — we want max data)
     cb_paused, cb_losses, cb_msg = check_circuit_breaker()
     print(f"🔒 Circuit breaker: {cb_msg}")

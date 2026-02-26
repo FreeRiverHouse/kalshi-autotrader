@@ -271,6 +271,11 @@ def api_reset_paper():
     return jsonify({"ok": True, "new_balance_usd": 100.0})
 
 
+@app.route("/api/param_history")
+def api_param_history():
+    return jsonify(_db.get_param_history(limit=50))
+
+
 # CORS for iframe embedding
 @app.after_request
 def add_cors(response):
@@ -776,6 +781,34 @@ body::after{
     </div>
   </div>
 
+  <!-- ALGO TUNING LOG -->
+  <div class="sec">Algo Tuning Log <span style="color:var(--cyan);font-size:.58rem;margin-left:.5rem" x-text="paramHistory.length?'('+paramHistory.length+' adj)':''"></span></div>
+  <div class="card" style="padding:1.15rem;margin-bottom:.9rem">
+    <div x-show="paramHistory.length===0" style="color:var(--text3);font-size:.78rem;text-align:center;padding:1rem">
+      Nessun adattamento ancora — l'algo si auto-tuna ogni 20 trade settled.
+    </div>
+    <div class="twrap" x-show="paramHistory.length>0">
+      <table class="tt">
+        <thead><tr>
+          <th>Timestamp</th><th>Parametro</th><th>Prima</th><th>Dopo</th><th>Delta</th><th>Reason</th>
+        </tr></thead>
+        <tbody>
+          <template x-for="p in paramHistory" :key="p.timestamp+p.param_name">
+            <tr>
+              <td class="mono" style="color:var(--text3);white-space:nowrap" x-text="p.timestamp.slice(0,16)"></td>
+              <td class="mono" style="color:var(--cyan)" x-text="p.param_name.replace(/_/g,' ')"></td>
+              <td class="mono" style="color:var(--text2)" x-text="p.old_value.toFixed(4)"></td>
+              <td class="mono" :class="p.new_value>p.old_value?'green':'red'" x-text="p.new_value.toFixed(4)"></td>
+              <td class="mono" :class="p.new_value>p.old_value?'green':'red'"
+                  x-text="(p.new_value>p.old_value?'+':'')+((p.new_value-p.old_value)*100).toFixed(2)+'%'"></td>
+              <td style="color:var(--text3);font-size:.72rem" x-text="p.reason||'—'"></td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
   <!-- TRADES TABLE -->
   <div class="sec">Ultimi Trade</div>
   <div class="card" style="padding:1.15rem;margin-bottom:.9rem">
@@ -844,6 +877,7 @@ function dash(){
     risk:{sharpe:0,sortino:0,calmar:0,maxDrawdownPct:0,profitFactor:0,avgDurationHours:null},
     edgeDist:{yes:[],no:[]},
     starting:false, resetting:false, resetMsg:'',
+    paramHistory:[],
 
     // GOLDEN CONFIG for comparison
     golden:{MIN_EDGE_BUY_NO:'3%',MIN_EDGE_BUY_YES:'8%',KELLY_FRACTION:'0.25',
@@ -923,6 +957,8 @@ function dash(){
           fetch('/api/cycle_hourly').then(r=>r.json()),
         ]);
         this.hourly=hourly; this.cycleHourly=cycleHourly;
+        // param history (non-blocking, best-effort)
+        fetch('/api/param_history').then(r=>r.json()).then(h=>{this.paramHistory=h||[];}).catch(()=>{});
         this.upd=new Date().toLocaleTimeString('it-IT');
         this.$nextTick(()=>this.charts());
       }catch(e){console.error(e)}

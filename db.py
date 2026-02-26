@@ -58,6 +58,16 @@ CREATE INDEX IF NOT EXISTS idx_trades_settled_at    ON trades(settled_at);
 CREATE INDEX IF NOT EXISTS idx_trades_result_status ON trades(result_status);
 CREATE INDEX IF NOT EXISTS idx_trades_action        ON trades(action);
 CREATE INDEX IF NOT EXISTS idx_trades_ticker        ON trades(ticker);
+
+CREATE TABLE IF NOT EXISTS param_history (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp      TEXT    NOT NULL DEFAULT (datetime('now', 'utc')),
+    settled_count  INTEGER NOT NULL,
+    param_name     TEXT    NOT NULL,
+    old_value      REAL    NOT NULL,
+    new_value      REAL    NOT NULL,
+    reason         TEXT
+);
 """
 
 
@@ -600,6 +610,31 @@ def get_risk_metrics() -> dict:
         "avgDurationHours": avg_dur,
         "totalPnlCents":    total_pnl,
     }
+
+
+# ── Adaptive Param History ─────────────────────────────────────────────────────
+
+def log_param_change(settled_count: int, param_name: str,
+                     old_value: float, new_value: float, reason: str = "") -> None:
+    """Record a parameter adjustment made by the adaptive tuner."""
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO param_history (settled_count, param_name, old_value, new_value, reason) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (settled_count, param_name, old_value, new_value, reason),
+        )
+
+
+def get_param_history(limit: int = 50) -> list[dict]:
+    """Return last N parameter adjustments, newest first."""
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT timestamp, settled_count, param_name, old_value, new_value, reason
+            FROM param_history
+            ORDER BY id DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ── Migration ──────────────────────────────────────────────────────────────────
