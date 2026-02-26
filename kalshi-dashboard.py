@@ -9,7 +9,7 @@ import re
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify, render_template_string, request
 
 import db as _db
 
@@ -230,6 +230,47 @@ def api_all():
         "last_updated":   datetime.now(timezone.utc).isoformat(),
     })
 
+@app.route("/api/start_trader", methods=["POST"])
+def api_start_trader():
+    """Start the trader via launchctl (uses existing KeepAlive LaunchAgent)."""
+    pid = trader_pid()
+    if pid is not None:
+        return jsonify({"ok": False, "reason": "already_running", "pid": pid})
+    try:
+        r = subprocess.run(
+            ["launchctl", "start", "com.frh.kalshi-autotrader"],
+            capture_output=True, text=True, timeout=10
+        )
+        import time; time.sleep(2)
+        new_pid = trader_pid()
+        if new_pid:
+            return jsonify({"ok": True, "pid": new_pid})
+        return jsonify({"ok": False, "reason": r.stderr.strip() or "not started after 2s"})
+    except Exception as e:
+        return jsonify({"ok": False, "reason": str(e)}), 500
+
+
+@app.route("/api/reset_paper", methods=["POST"])
+def api_reset_paper():
+    """Reset ONLY paper-trade-state.json (balance + positions). SQLite data is NEVER touched."""
+    data = request.get_json(silent=True) or {}
+    if not data.get("confirm"):
+        return jsonify({"ok": False, "reason": "missing confirm=true"}), 400
+
+    fresh = {
+        "starting_balance_cents": 10000,
+        "current_balance_cents":  10000,
+        "positions": [],
+        "stats": {"wins": 0, "losses": 0, "total_pnl_cents": 0},
+        "trade_history": [],
+        "reset_at": datetime.now(timezone.utc).isoformat(),
+        "reset_reason": data.get("reason", "manual reset from dashboard"),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    PAPER_STATE.write_text(json.dumps(fresh, indent=2))
+    return jsonify({"ok": True, "new_balance_usd": 100.0})
+
+
 # CORS for iframe embedding
 @app.after_request
 def add_cors(response):
@@ -391,6 +432,40 @@ body::after{
 .bn{background:rgba(239,68,68,.12);color:var(--red);border-color:rgba(239,68,68,.3)}
 .pp{color:var(--green);font-weight:600;font-family:'JetBrains Mono',monospace}
 .pn{color:var(--red);font-weight:600;font-family:'JetBrains Mono',monospace}
+/* ── Start Trader Button ─────────────────────────────────── */
+.start-btn{
+  display:flex;align-items:center;gap:.45rem;
+  padding:.35rem .9rem;border-radius:8px;border:1px solid rgba(16,185,129,.45);
+  background:rgba(16,185,129,.12);color:var(--green);cursor:pointer;font-size:.72rem;
+  font-weight:700;letter-spacing:.06em;transition:.2s;font-family:inherit;
+}
+.start-btn:hover{background:rgba(16,185,129,.22);box-shadow:0 0 12px rgba(16,185,129,.3)}
+.start-btn:disabled{opacity:.5;cursor:not-allowed}
+.last-act{font-size:.65rem;color:var(--text3);font-family:'JetBrains Mono',monospace}
+/* ── Recent Bets Live Feed ───────────────────────────────── */
+.live-feed{display:flex;flex-direction:column;gap:.4rem;max-height:360px;overflow-y:auto}
+.bet-row{
+  display:flex;align-items:center;gap:.75rem;padding:.6rem .9rem;border-radius:10px;
+  border:1px solid var(--border);background:var(--card);font-size:.78rem;
+  transition:border-color .2s;
+}
+.bet-row:hover{border-color:var(--border2)}
+.bet-row.won{border-left:3px solid var(--green)}
+.bet-row.lost{border-left:3px solid var(--red)}
+.bet-row.pending{border-left:3px solid var(--cyan)}
+.bet-time{font-size:.65rem;color:var(--text3);font-family:'JetBrains Mono',monospace;white-space:nowrap;min-width:72px}
+.bet-ticker{font-family:'JetBrains Mono',monospace;font-size:.72rem;color:var(--text2);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
+.bet-pnl{font-family:'JetBrains Mono',monospace;font-size:.78rem;font-weight:700;white-space:nowrap}
+/* ── Reset Danger Zone ───────────────────────────────────── */
+.danger-zone{border:1px solid rgba(239,68,68,.25);border-radius:14px;padding:1rem 1.4rem;margin-top:.9rem}
+.danger-title{font-size:.6rem;text-transform:uppercase;letter-spacing:.15em;color:var(--red);margin-bottom:.6rem}
+.reset-btn{
+  padding:.38rem .9rem;border-radius:8px;border:1px solid rgba(239,68,68,.4);
+  background:rgba(239,68,68,.08);color:var(--red);cursor:pointer;font-size:.72rem;
+  font-weight:700;letter-spacing:.06em;transition:.2s;font-family:inherit;
+}
+.reset-btn:hover{background:rgba(239,68,68,.18);box-shadow:0 0 10px rgba(239,68,68,.2)}
 /* ── Paper Banner ────────────────────────────────────────── */
 .paper-banner{
   border:1px solid rgba(245,158,11,.35);
@@ -457,6 +532,13 @@ body::after{
         <span x-text="m.trader_running ? 'LIVE' : 'OFFLINE'"></span>
         <span x-show="m.trader_pid" class="mono" x-text="'#'+m.trader_pid" style="opacity:.55;font-size:.62rem"></span>
       </div>
+      <!-- Start Trader button — only when offline -->
+      <button x-show="!m.trader_running" class="start-btn" :disabled="starting"
+              @click="startTrader()">
+        <span x-text="starting ? '⏳ Starting…' : '▶ Start Trader'"></span>
+      </button>
+      <!-- Last trade activity -->
+      <div class="last-act" x-show="lastActText" x-text="'⏱ '+lastActText"></div>
       <div class="lupd" x-text="upd"></div>
       <button class="tbtn" @click="toggleDark()" :title="dark?'Light mode':'Dark mode'">
         <span x-text="dark ? '☀️' : '🌙'"></span>
@@ -466,6 +548,30 @@ body::after{
 </header>
 
 <div class="wrap">
+
+  <!-- RECENT BETS LIVE FEED -->
+  <div class="sec">Ultime Bet <span style="color:var(--cyan);margin-left:.4rem" x-text="trades.length?'('+trades.length+')':''"></span></div>
+  <div class="card" style="padding:1rem 1.15rem;margin-bottom:.9rem">
+    <div x-show="trades.length===0" style="color:var(--text3);font-size:.8rem;text-align:center;padding:1.5rem">
+      Nessun trade ancora — l'algo sta scansionando mercati…
+    </div>
+    <div class="live-feed">
+      <template x-for="t in trades.slice(0,20)" :key="t.ts+t.ticker">
+        <div class="bet-row" :class="t.status">
+          <div class="bet-time" x-text="relTime(t.ts)"></div>
+          <span class="bdg" :class="t.action==='BUY_NO'?'bn':'by'" x-text="t.action" style="flex-shrink:0"></span>
+          <div class="bet-ticker" :title="t.title" x-text="t.ticker.slice(0,30)"></div>
+          <div class="mono" style="color:var(--text3);white-space:nowrap" x-text="t.price+'¢ × '+t.contracts"></div>
+          <div class="mono" style="color:var(--text2);white-space:nowrap" x-text="'edge '+t.edge+'%'"></div>
+          <span class="bdg" :class="t.status==='won'?'bw':t.status==='lost'?'bl':'bp'" x-text="t.status" style="flex-shrink:0"></span>
+          <div class="bet-pnl" x-show="t.pnl_usd!==null"
+               :class="t.pnl_usd>=0?'pp':'pn'"
+               x-text="(t.pnl_usd>=0?'+':'')+'$'+(t.pnl_usd||0).toFixed(2)"></div>
+          <div style="color:var(--text3);font-size:.7rem;white-space:nowrap" x-show="t.pnl_usd===null">⏳</div>
+        </div>
+      </template>
+    </div>
+  </div>
 
   <!-- PAPER MODE BANNER -->
   <div class="paper-banner">
@@ -706,6 +812,20 @@ body::after{
     </div>
   </div>
 
+  <!-- DANGER ZONE -->
+  <div class="danger-zone">
+    <div class="danger-title">⚠️ Danger Zone</div>
+    <div style="display:flex;align-items:center;gap:1.2rem;flex-wrap:wrap">
+      <button class="reset-btn" @click="resetPaper()" :disabled="resetting">
+        <span x-text="resetting ? '⏳ Resettando…' : '🔄 Reset Paper Mode ($100)'"></span>
+      </button>
+      <span style="font-size:.7rem;color:var(--text3)">
+        Azzera balance e posizioni paper. I dati SQLite (storico trade) NON vengono cancellati.
+      </span>
+    </div>
+    <div x-show="resetMsg" x-text="resetMsg" style="margin-top:.6rem;font-size:.75rem;color:var(--green)"></div>
+  </div>
+
 </div><!-- /wrap -->
 
 <script>
@@ -723,10 +843,57 @@ function dash(){
     calibration:[],streaks:{longestWin:0,longestLoss:0,current:0,currentType:'none'},
     risk:{sharpe:0,sortino:0,calmar:0,maxDrawdownPct:0,profitFactor:0,avgDurationHours:null},
     edgeDist:{yes:[],no:[]},
+    starting:false, resetting:false, resetMsg:'',
 
     // GOLDEN CONFIG for comparison
     golden:{MIN_EDGE_BUY_NO:'3%',MIN_EDGE_BUY_YES:'8%',KELLY_FRACTION:'0.25',
             MAX_BET_CENTS:'500',MAX_POSITIONS:'15',DAILY_LOSS_LIMIT_CENTS:'500'},
+
+    get lastActText(){
+      if(!this.trades||!this.trades.length) return '';
+      const ts=this.trades[0].ts; if(!ts) return '';
+      const d=new Date(ts.replace(' ','T')+'Z');
+      const diff=Math.floor((Date.now()-d)/1000);
+      if(diff<60)   return diff+'s ago';
+      if(diff<3600) return Math.floor(diff/60)+'m ago';
+      return Math.floor(diff/3600)+'h ago';
+    },
+
+    relTime(ts){
+      if(!ts) return '—';
+      const d=new Date(ts.replace(' ','T')+'Z');
+      const diff=Math.floor((Date.now()-d)/1000);
+      if(diff<60)   return diff+'s fa';
+      if(diff<3600) return Math.floor(diff/60)+'m fa';
+      if(diff<86400) return Math.floor(diff/3600)+'h fa';
+      return ts.slice(5,16);
+    },
+
+    async startTrader(){
+      this.starting=true;
+      try{
+        const r=await fetch('/api/start_trader',{method:'POST'}).then(x=>x.json());
+        if(r.ok){ await this.refresh(); }
+        else{ alert('Start failed: '+r.reason); }
+      }catch(e){alert('Error: '+e);}
+      this.starting=false;
+    },
+
+    async resetPaper(){
+      if(!confirm('CONFERMA: azzerare paper mode? Balance torna a $100, posizioni cancellate. I trade storici SQLite rimangono intatti.')) return;
+      this.resetting=true; this.resetMsg='';
+      try{
+        const r=await fetch('/api/reset_paper',{
+          method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({confirm:true,reason:'manual reset from dashboard'})
+        }).then(x=>x.json());
+        if(r.ok){
+          this.resetMsg='✅ Reset completato — balance: $100.00';
+          await this.refresh();
+        } else { this.resetMsg='❌ '+r.reason; }
+      }catch(e){this.resetMsg='❌ '+e;}
+      this.resetting=false;
+    },
 
     init(){ this.refresh(); setInterval(()=>this.refresh(),15000); },
 
