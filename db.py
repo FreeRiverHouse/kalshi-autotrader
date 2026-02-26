@@ -406,6 +406,202 @@ def get_cycle_hourly_distribution() -> list[dict]:
     return result
 
 
+# ── Analytics ─────────────────────────────────────────────────────────────────
+
+def get_calibration_data() -> list[dict]:
+    """Forecast accuracy per decile bin. Returns predicted vs actual win rate."""
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT
+                forecast_prob,
+                result_status
+            FROM trades
+            WHERE result_status IN ('won','lost')
+              AND forecast_prob IS NOT NULL
+            ORDER BY forecast_prob
+        """).fetchall()
+
+    # 10 bins: 0-10%, 10-20%, ..., 90-100%
+    bins = [{"label": f"{i*10}-{(i+1)*10}%", "predicted": i*10 + 5.0,
+             "wins": 0, "total": 0} for i in range(10)]
+    for r in rows:
+        prob = r["forecast_prob"] or 0.0
+        idx = min(int(prob * 10), 9)
+        bins[idx]["total"] += 1
+        if r["result_status"] == "won":
+            bins[idx]["wins"] += 1
+
+    result = []
+    for b in bins:
+        actual = round(b["wins"] / b["total"] * 100, 1) if b["total"] > 0 else None
+        result.append({
+            "label":     b["label"],
+            "predicted": b["predicted"],
+            "actual":    actual,
+            "count":     b["total"],
+        })
+    return result
+
+
+def get_streak_analysis() -> dict:
+    """Win/loss streak analysis from settled trades ordered by settled_at."""
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT result_status FROM trades
+            WHERE result_status IN ('won','lost')
+              AND settled_at IS NOT NULL
+            ORDER BY settled_at ASC
+        """).fetchall()
+
+    statuses = [r["result_status"] for r in rows]
+    if not statuses:
+        return {"longestWin": 0, "longestLoss": 0, "current": 0,
+                "currentType": "none", "totalTrades": 0}
+
+    longest_win = longest_loss = cur = 0
+    cur_type = statuses[0]
+    cur = 1
+
+    def update_longest(t, n, lw, ll):
+        if t == "won":
+            return max(lw, n), ll
+        return lw, max(ll, n)
+
+    for s in statuses[1:]:
+        if s == cur_type:
+            cur += 1
+        else:
+            longest_win, longest_loss = update_longest(cur_type, cur, longest_win, longest_loss)
+            cur_type = s
+            cur = 1
+    longest_win, longest_loss = update_longest(cur_type, cur, longest_win, longest_loss)
+
+    return {
+        "longestWin":  longest_win,
+        "longestLoss": longest_loss,
+        "current":     cur,
+        "currentType": cur_type,
+        "totalTrades": len(statuses),
+    }
+
+
+def get_edge_distribution() -> dict:
+    """Edge histogram by bucket, split by BUY_YES / BUY_NO."""
+    buckets = [
+        {"label": "<1%",   "min": -99,  "max": 0.01},
+        {"label": "1-3%",  "min": 0.01, "max": 0.03},
+        {"label": "3-5%",  "min": 0.03, "max": 0.05},
+        {"label": "5-10%", "min": 0.05, "max": 0.10},
+        {"label": ">10%",  "min": 0.10, "max": 99},
+    ]
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT action, edge, result_status
+            FROM trades
+            WHERE edge IS NOT NULL
+              AND result_status IN ('won', 'lost')
+        """).fetchall()
+
+    yes_dist = {b["label"]: {"total": 0, "won": 0} for b in buckets}
+    no_dist  = {b["label"]: {"total": 0, "won": 0} for b in buckets}
+
+    for r in rows:
+        e = r["edge"] or 0.0
+        for b in buckets:
+            if b["min"] <= e < b["max"]:
+                target = yes_dist if r["action"] == "BUY_YES" else no_dist
+                target[b["label"]]["total"] += 1
+                if r["result_status"] == "won":
+                    target[b["label"]]["won"] += 1
+                break
+
+    def fmt(d):
+        out = []
+        for label, v in d.items():
+            wr = round(v["won"] / v["total"] * 100, 1) if v["total"] else None
+            out.append({"label": label, "total": v["total"],
+                        "won": v["won"], "winRate": wr})
+        return out
+
+    return {"yes": fmt(yes_dist), "no": fmt(no_dist)}
+
+
+def get_risk_metrics() -> dict:
+    """Sharpe, Sortino, Calmar, max drawdown from settled trades."""
+    import math
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT pnl_cents, cost_cents, settled_at
+            FROM trades
+            WHERE result_status IN ('won','lost')
+              AND pnl_cents IS NOT NULL AND cost_cents > 0
+            ORDER BY settled_at ASC
+        """).fetchall()
+
+    if not rows:
+        return {"sharpe": 0, "sortino": 0, "calmar": 0,
+                "maxDrawdownPct": 0, "maxDrawdownCents": 0,
+                "profitFactor": 0, "avgDurationHours": None}
+
+    returns = [r["pnl_cents"] / r["cost_cents"] for r in rows]
+    n = len(returns)
+    mean_r = sum(returns) / n
+    variance = sum((x - mean_r) ** 2 for x in returns) / n if n > 1 else 0
+    std_r = math.sqrt(variance)
+    downside = [min(x, 0) for x in returns]
+    downside_var = sum(x ** 2 for x in downside) / n
+    downside_std = math.sqrt(downside_var)
+
+    scale = math.sqrt(252)  # annualise (approx daily trades)
+    sharpe  = round(mean_r / std_r * scale, 3) if std_r else 0
+    sortino = round(mean_r / downside_std * scale, 3) if downside_std else 0
+
+    # Max drawdown on cumulative PnL
+    cum, peak, max_dd = 0, 0, 0
+    for r in rows:
+        cum += r["pnl_cents"]
+        if cum > peak:
+            peak = cum
+        dd = peak - cum
+        if dd > max_dd:
+            max_dd = dd
+
+    peak_pos = max(cum + max_dd, 1)
+    max_dd_pct = round(max_dd / peak_pos * 100, 2) if peak_pos else 0
+
+    total_pnl = sum(r["pnl_cents"] for r in rows)
+    # annualised return approx
+    annualised = mean_r * 252
+    calmar = round(annualised / (max_dd_pct / 100), 3) if max_dd_pct else 0
+
+    gross_profit = sum(r["pnl_cents"] for r in rows if r["pnl_cents"] > 0)
+    gross_loss   = abs(sum(r["pnl_cents"] for r in rows if r["pnl_cents"] < 0))
+    profit_factor = round(gross_profit / gross_loss, 3) if gross_loss else 0
+
+    # Avg duration (hours) for settled trades with timestamps
+    with get_conn() as conn:
+        dur_rows = conn.execute("""
+            SELECT
+              (julianday(settled_at) - julianday(timestamp)) * 24 as dur_h
+            FROM trades
+            WHERE result_status IN ('won','lost')
+              AND settled_at IS NOT NULL AND timestamp IS NOT NULL
+        """).fetchall()
+    valid_durs = [r["dur_h"] for r in dur_rows if r["dur_h"] is not None and r["dur_h"] >= 0]
+    avg_dur = round(sum(valid_durs) / len(valid_durs), 2) if valid_durs else None
+
+    return {
+        "sharpe":           sharpe,
+        "sortino":          sortino,
+        "calmar":           calmar,
+        "maxDrawdownPct":   max_dd_pct,
+        "maxDrawdownCents": max_dd,
+        "profitFactor":     profit_factor,
+        "avgDurationHours": avg_dur,
+        "totalPnlCents":    total_pnl,
+    }
+
+
 # ── Migration ──────────────────────────────────────────────────────────────────
 
 def migrate_from_jsonl(jsonl_path: Path, cycles_path: Path | None = None) -> tuple[int, int]:

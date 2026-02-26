@@ -167,9 +167,11 @@ VIRTUAL_BALANCE = 100.0  # Virtual balance for paper mode when real balance < $1
 
 # ── Trading parameters (data-driven from v3's 132 settled trades analysis) ──
 # BUY_NO: 76% WR overall → low bar.  BUY_YES: 19% WR overall → high bar.
-MIN_EDGE_BUY_NO  = 0.005  # 0.5% min for BUY_NO  (paper mode: collect data, bankroll is fake)
-MIN_EDGE_BUY_YES = 0.01   # 1% min for BUY_YES (paper mode: collect data, bankroll is fake)
-CALIBRATION_FACTOR = 0.65  # baseline; overridden dynamically
+MIN_EDGE_BUY_NO  = 0.03   # 3% min for BUY_NO  (golden config — was 0.5% paper mode, too loose)
+MIN_EDGE_BUY_YES = 0.08   # 8% min for BUY_YES (golden config — YES has 29% WR, needs high bar)
+CALIBRATION_FACTOR = 0.65  # legacy: kept for dynamic calibration baseline
+CALIBRATION_FACTOR_YES = 0.40  # YES is systematically overconfident → shrink hard toward 50%
+CALIBRATION_FACTOR_NO  = 0.70  # NO works well (75.9% WR) → light shrink
 
 
 def _compute_dynamic_calibration_factor(
@@ -226,8 +228,9 @@ def get_calibration_factor(trade_history: list | None = None) -> float:
         return _compute_dynamic_calibration_factor(trade_history)
     return CALIBRATION_FACTOR  # Shrink LLM/heuristic probs toward 50% to correct overconfidence
                             # (Grok: predicted 71.5% → actual 46.2%, ratio ~0.65)
-MIN_EDGE = 0.02            # Global minimum (paper mode: more trades = more data)
-MAX_EDGE_CAP = 0.10        # Cap edges >10% (overconfident forecaster at >10%: 0% WR)
+MIN_EDGE = 0.03            # Global minimum (raised to match MIN_EDGE_BUY_NO)
+MAX_EDGE_CAP_YES = 0.06   # YES >6% edge = almost certainly miscalibrated (28.6% WR at >10%)
+MAX_EDGE_CAP_NO  = 0.10   # NO works well even at high edge
 MAX_POSITION_PCT = 0.05    # Max 5% of portfolio per position
 KELLY_FRACTION = 0.25      # Quarter-Kelly: conservative (Grok uses 0.75 but we need data first)
 MIN_BET_CENTS = 5
@@ -248,11 +251,11 @@ def dynamic_max_positions(balance: float) -> int:
 
 # ── Risk/Reward filters (TRADE-003: fix loss 2x > win asymmetry) ──
 # BUY_NO at >50¢ means you risk more than you win. Require bigger edge to justify.
-MAX_NO_PRICE_CENTS = 92     # Hard cap: paper mode allows up to 92¢ NO price for data collection
+MAX_NO_PRICE_CENTS = 75     # Hard cap: ≤75¢ NO (was 92¢ — at 92¢ you risk $0.92 to win $0.08)
 NO_PRICE_EDGE_SCALE = True  # Scale min edge up with BUY_NO price
 # If NO price is 50-65¢, require edge >= 3% + 0.1% per cent above 50
 # e.g., 55¢ → 3.5% min edge, 60¢ → 4% min edge, 65¢ → 4.5%
-MAX_RISK_REWARD_RATIO = 11.5 # paper mode: allow up to 92¢ NO (92/8=11.5) for data collection
+MAX_RISK_REWARD_RATIO = 4.0  # max 80¢/20¢ = 4:1 risk/reward (was 11.5 for data collection)
 
 # ── Parlay strategy (from v3 data) ──
 PARLAY_ONLY_NO = True       # On multi-leg parlays, primarily take BUY_NO
@@ -277,7 +280,7 @@ MAX_PRICE_CENTS = 50   # Grok rec C: raise to 50¢ for more volume (breakeven WR
 # ── Circuit breaker / daily loss ──
 CIRCUIT_BREAKER_THRESHOLD = 5  # Pause after N consecutive losses
 CIRCUIT_BREAKER_COOLDOWN_HOURS = 4
-DAILY_LOSS_LIMIT_CENTS = 1500  # $15 daily loss limit (15% of $100 bankroll per Grok pointer)
+DAILY_LOSS_LIMIT_CENTS = 500   # $5 daily loss limit (golden config — was $15, too loose)
 
 # ── Weather markets (v2's T422) ──
 WEATHER_ENABLED = os.getenv("WEATHER_ENABLED", "false").lower() in ("true", "1", "yes")
@@ -1590,16 +1593,16 @@ What is the TRUE probability this resolves YES? Be specific about price levels a
     content = result["content"]
     raw_prob = parse_probability(content) or market.market_prob
 
-    # Apply calibration: direction depends on market_prob
-    # For unlikely events (<30%): calibrate toward 0 (LLM overestimates tail risk)
-    # For likely events (>70%): calibrate toward 1 (LLM underestimates near-certainty)
-    # For middle range: shrink toward 50% (standard overconfidence correction)
+    # Apply calibration: direction-aware + side-aware shrinkage
+    # YES direction (raw_prob > market_prob) uses aggressive shrink (YES has 29% WR historically)
+    # NO direction (raw_prob < market_prob) uses lighter shrink (NO has 76% WR historically)
+    cal_factor = CALIBRATION_FACTOR_YES if raw_prob >= market.market_prob else CALIBRATION_FACTOR_NO
     if market.market_prob < 0.30:
-        prob = raw_prob * CALIBRATION_FACTOR  # compress toward 0%
+        prob = raw_prob * cal_factor  # compress toward 0%
     elif market.market_prob > 0.70:
-        prob = 1.0 - (1.0 - raw_prob) * CALIBRATION_FACTOR  # compress toward 100%
+        prob = 1.0 - (1.0 - raw_prob) * cal_factor  # compress toward 100%
     else:
-        prob = 0.5 + (raw_prob - 0.5) * CALIBRATION_FACTOR  # compress toward 50%
+        prob = 0.5 + (raw_prob - 0.5) * cal_factor  # compress toward 50%
     prob = max(0.03, min(0.97, prob))
 
     # Apply regime discounts algorithmically (not via LLM prompt)
@@ -1705,13 +1708,14 @@ Is the forecaster overconfident? Missing factors? Is the edge real?"""
 
     content = result["content"]
     raw_adj = parse_probability(content) or forecast.probability
-    # Apply calibration (same direction-aware formula as forecaster)
+    # Apply calibration: side-aware (same logic as forecaster)
+    cal_factor = CALIBRATION_FACTOR_YES if raw_adj >= market.market_prob else CALIBRATION_FACTOR_NO
     if market.market_prob < 0.30:
-        adj_prob = raw_adj * CALIBRATION_FACTOR
+        adj_prob = raw_adj * cal_factor
     elif market.market_prob > 0.70:
-        adj_prob = 1.0 - (1.0 - raw_adj) * CALIBRATION_FACTOR
+        adj_prob = 1.0 - (1.0 - raw_adj) * cal_factor
     else:
-        adj_prob = 0.5 + (raw_adj - 0.5) * CALIBRATION_FACTOR
+        adj_prob = 0.5 + (raw_adj - 0.5) * cal_factor
     adj_prob = max(0.03, min(0.97, adj_prob))
     major_flaws = []
     flaws_match = re.search(r'MAJOR_FLAWS:\s*(.+)', content, re.IGNORECASE)
@@ -2016,8 +2020,9 @@ def _heuristic_crypto(market: MarketInfo, context: dict = None) -> tuple:
 
     prob_above = max(0.05, min(0.95, prob_above))
 
-    # Calibration scaling — use global CALIBRATION_FACTOR (same as LLM forecaster)
-    prob_above = 0.5 + (prob_above - 0.5) * CALIBRATION_FACTOR
+    # Calibration scaling — side-aware: YES direction (prob_above > 0.5) shrinks harder
+    _cal = CALIBRATION_FACTOR_YES if prob_above >= 0.5 else CALIBRATION_FACTOR_NO
+    prob_above = 0.5 + (prob_above - 0.5) * _cal
     prob_above = max(0.05, min(0.95, prob_above))
 
     distance_pct = abs(current_price - strike) / current_price * 100
@@ -2218,9 +2223,10 @@ def make_trade_decision(market: MarketInfo, forecast: ForecastResult, critic: Cr
     # if forecast.confidence == "low" and edge_yes > 0 and abs(edge_yes) < 0.10:
     #     return TradeDecision(action="SKIP", ...)
 
-    # Cap edges
-    if abs(edge_yes) > MAX_EDGE_CAP:
-        edge_yes = MAX_EDGE_CAP if edge_yes > 0 else -MAX_EDGE_CAP
+    # Cap edges — YES capped lower (YES forecasts are systematically miscalibrated at high edge)
+    cap = MAX_EDGE_CAP_YES if edge_yes > 0 else MAX_EDGE_CAP_NO
+    if abs(edge_yes) > cap:
+        edge_yes = cap if edge_yes > 0 else -cap
         final_prob = market_prob + edge_yes
 
     # Parlay BUY_YES filter
@@ -2245,10 +2251,13 @@ def make_trade_decision(market: MarketInfo, forecast: ForecastResult, critic: Cr
                             reason=f"BUY_NO price {side_price}¢ > {MAX_NO_PRICE_CENTS}¢ cap (bad risk/reward)",
                             forecast=forecast, critic=critic)
 
-    # 2. Scaled edge requirement for expensive BUY_NO — disabled in paper mode (data collection)
-    # if action == "BUY_NO" and NO_PRICE_EDGE_SCALE and side_price > 50:
-    #     scaled_min_edge = 0.03 + (side_price - 50) * 0.001
-    #     if edge < scaled_min_edge: ...  # re-enable for live trading
+    # 2. Scaled edge requirement for expensive BUY_NO (re-enabled: data shows bad R/R at high prices)
+    if action == "BUY_NO" and NO_PRICE_EDGE_SCALE and side_price > 50:
+        scaled_min_edge = 0.03 + (side_price - 50) * 0.001  # 50¢→3%, 55¢→3.5%, 60¢→4%, 65¢→4.5%
+        if edge < scaled_min_edge:
+            return TradeDecision(action="SKIP", edge=edge, kelly_size=0, contracts=0, price_cents=side_price,
+                                reason=f"BUY_NO {side_price}¢ needs edge≥{scaled_min_edge:.1%}, got {edge:.1%}",
+                                forecast=forecast, critic=critic)
 
     # 3. General risk/reward ratio check
     potential_win = 100 - side_price  # cents won if correct

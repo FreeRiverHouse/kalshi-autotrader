@@ -16,7 +16,9 @@ import db as _db
 app = Flask(__name__)
 
 DATA_DIR    = Path(__file__).parent / "data" / "trading"
-PAPER_STATE = DATA_DIR / "paper-trade-state.json"
+_SSD_DATA   = Path("/Volumes/DATI-SSD/kalshi-logs")
+PAPER_STATE = (_SSD_DATA / "paper-trade-state.json") if _SSD_DATA.exists() else DATA_DIR / "paper-trade-state.json"
+WATCHDOG_STATE = (_SSD_DATA / "watchdog-last.json") if _SSD_DATA.exists() else DATA_DIR / "watchdog-last.json"
 AUTOTRADER  = Path(__file__).parent / "kalshi-autotrader.py"
 
 # Ensure DB and schema exist at startup
@@ -29,6 +31,14 @@ def load_paper_state() -> dict:
     if PAPER_STATE.exists():
         try:
             return json.loads(PAPER_STATE.read_text())
+        except Exception:
+            pass
+    return {}
+
+def load_watchdog_state() -> dict:
+    if WATCHDOG_STATE.exists():
+        try:
+            return json.loads(WATCHDOG_STATE.read_text())
         except Exception:
             pass
     return {}
@@ -95,6 +105,7 @@ def compute_metrics() -> dict:
         "trader_running":     pid is not None,
         "trader_pid":         pid,
         "last_updated":       datetime.now(timezone.utc).isoformat(),
+        "watchdog":           load_watchdog_state(),
     }
 
 
@@ -173,6 +184,58 @@ def api_hourly_distribution():
 @app.route("/api/cycle_hourly")
 def api_cycle_hourly():
     return jsonify(_db.get_cycle_hourly_distribution())
+
+@app.route("/api/calibration")
+def api_calibration():
+    return jsonify(_db.get_calibration_data())
+
+@app.route("/api/streaks")
+def api_streaks():
+    return jsonify(_db.get_streak_analysis())
+
+@app.route("/api/edge_distribution")
+def api_edge_distribution():
+    return jsonify(_db.get_edge_distribution())
+
+@app.route("/api/risk_metrics")
+def api_risk_metrics():
+    return jsonify(_db.get_risk_metrics())
+
+@app.route("/api/all")
+def api_all():
+    """Single endpoint for dashboard: returns all data in one request."""
+    m   = compute_metrics()
+    ps  = load_paper_state()
+    wd  = load_watchdog_state()
+    pid = trader_pid()
+    return jsonify({
+        "metrics":         m,
+        "trades":          get_recent_trades(100),
+        "roi_series":      _db.get_roi_series(),
+        "cycle_series":    _db.get_cycle_series(500),
+        "daily_stats":     _db.get_daily_stats(),
+        "calibration":     _db.get_calibration_data(),
+        "streaks":         _db.get_streak_analysis(),
+        "edge_dist":       _db.get_edge_distribution(),
+        "risk":            _db.get_risk_metrics(),
+        "config":          get_config_params(),
+        "paper_state": {
+            "current_balance_usd":  round((ps.get("current_balance_cents") or 0) / 100, 2),
+            "starting_balance_usd": round((ps.get("starting_balance_cents") or 10000) / 100, 2),
+            "open_positions":       len(ps.get("positions") or []),
+        },
+        "trader_running": pid is not None,
+        "trader_pid":     pid,
+        "watchdog":       wd,
+        "last_updated":   datetime.now(timezone.utc).isoformat(),
+    })
+
+# CORS for iframe embedding
+@app.after_request
+def add_cors(response):
+    response.headers["Access-Control-Allow-Origin"]  = "*"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return response
 
 # ── HTML Dashboard ─────────────────────────────────────────────────────────────
 
@@ -328,6 +391,48 @@ body::after{
 .bn{background:rgba(239,68,68,.12);color:var(--red);border-color:rgba(239,68,68,.3)}
 .pp{color:var(--green);font-weight:600;font-family:'JetBrains Mono',monospace}
 .pn{color:var(--red);font-weight:600;font-family:'JetBrains Mono',monospace}
+/* ── Paper Banner ────────────────────────────────────────── */
+.paper-banner{
+  border:1px solid rgba(245,158,11,.35);
+  background:linear-gradient(135deg,rgba(245,158,11,.08),rgba(245,158,11,.03));
+  border-radius:14px;padding:1.1rem 1.4rem;margin-bottom:1rem;
+  display:flex;align-items:center;flex-wrap:wrap;gap:1.2rem;
+}
+.paper-banner .pb-tag{
+  display:flex;align-items:center;gap:.5rem;font-size:.75rem;font-weight:700;
+  letter-spacing:.12em;color:var(--yellow);text-transform:uppercase;
+}
+.paper-banner .pb-dot{
+  width:9px;height:9px;border-radius:50%;background:var(--yellow);
+  box-shadow:0 0 8px var(--yellow);animation:blink 1.8s ease-in-out infinite;
+}
+.paper-banner .pb-stats{display:flex;flex-wrap:wrap;gap:1.5rem;margin-left:auto}
+.paper-banner .pb-stat{text-align:right}
+.paper-banner .pb-val{font-size:1.4rem;font-weight:700;letter-spacing:-.02em;font-variant-numeric:tabular-nums;font-family:'JetBrains Mono',monospace}
+.paper-banner .pb-lbl{font-size:.6rem;text-transform:uppercase;letter-spacing:.12em;color:var(--text3)}
+/* ── Risk Cards ──────────────────────────────────────────── */
+.risk-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:.75rem;margin-bottom:.9rem}
+.rcard{border:1px solid var(--border);border-radius:12px;padding:1rem;text-align:center;
+       background:var(--card);backdrop-filter:blur(18px)}
+.rval{font-size:1.55rem;font-weight:700;letter-spacing:-.02em;font-variant-numeric:tabular-nums;font-family:'JetBrains Mono',monospace}
+.rlbl{font-size:.6rem;text-transform:uppercase;letter-spacing:.12em;color:var(--text3);margin-top:.3rem}
+/* ── Golden Config Table ─────────────────────────────────── */
+.cfg-tbl{width:100%;border-collapse:collapse;font-size:.8rem}
+.cfg-tbl th{padding:.55rem .85rem;text-align:left;font-size:.6rem;text-transform:uppercase;
+  letter-spacing:.1em;color:var(--text3);border-bottom:1px solid var(--border)}
+.cfg-tbl td{padding:.52rem .85rem;border-bottom:1px solid rgba(99,179,237,.04);font-family:'JetBrains Mono',monospace;font-size:.78rem}
+.cfg-tbl tr:hover td{background:rgba(6,182,212,.04)}
+.cfg-ok{color:var(--green)}.cfg-warn{color:var(--red);font-weight:700}
+/* ── Streak Pill ─────────────────────────────────────────── */
+.streak-pill{
+  display:inline-flex;align-items:center;gap:.4rem;
+  padding:.4rem .9rem;border-radius:999px;font-size:.78rem;font-weight:700;border:1px solid;
+}
+.streak-win{background:rgba(16,185,129,.12);border-color:rgba(16,185,129,.35);color:var(--green)}
+.streak-loss{background:rgba(239,68,68,.12);border-color:rgba(239,68,68,.35);color:var(--red)}
+.streak-none{background:rgba(99,179,237,.08);border-color:rgba(99,179,237,.25);color:var(--cyan)}
+/* ── Calibration ─────────────────────────────────────────── */
+.calib-empty{color:var(--text3);font-size:.8rem;padding:1.5rem;text-align:center}
 /* scrollbar */
 ::-webkit-scrollbar{width:5px;height:5px}
 ::-webkit-scrollbar-track{background:transparent}
@@ -361,6 +466,30 @@ body::after{
 </header>
 
 <div class="wrap">
+
+  <!-- PAPER MODE BANNER -->
+  <div class="paper-banner">
+    <div class="pb-tag"><div class="pb-dot"></div>Paper Trading Mode</div>
+    <div class="pb-stats">
+      <div class="pb-stat">
+        <div class="pb-val yellow" x-text="'$'+(paper.current_balance_usd||0).toFixed(2)">—</div>
+        <div class="pb-lbl">Balance / <span x-text="'$'+(paper.starting_balance_usd||100).toFixed(0)"></span> start</div>
+      </div>
+      <div class="pb-stat">
+        <div class="pb-val" :class="(m.roi_pct||0)>=0?'green':'red'"
+             x-text="((m.roi_pct||0)>=0?'+':'')+(m.roi_pct||0).toFixed(1)+'%'">—</div>
+        <div class="pb-lbl">Paper ROI</div>
+      </div>
+      <div class="pb-stat">
+        <div class="pb-val cyan" x-text="(paper.open_positions||0)">—</div>
+        <div class="pb-lbl">Open Positions</div>
+      </div>
+      <div class="pb-stat">
+        <div class="pb-val" :class="m.trader_running?'green':'red'" x-text="m.trader_running?'RUNNING':'STOPPED'">—</div>
+        <div class="pb-lbl">Trader</div>
+      </div>
+    </div>
+  </div>
 
   <!-- STAT CARDS -->
   <div class="sgrid">
@@ -446,6 +575,88 @@ body::after{
     <div class="card cc"><div class="ct">Trade Piazzati per Ora</div><div id="ch-hour-trades"></div></div>
   </div>
 
+  <!-- RISK METRICS + STREAKS -->
+  <div class="sec">Risk Metrics &amp; Streaks</div>
+  <div class="risk-grid">
+    <div class="rcard">
+      <div class="rval" :class="(risk.sharpe||0)>=1?'green':(risk.sharpe||0)>=0?'yellow':'red'"
+           x-text="(risk.sharpe||0).toFixed(2)">—</div>
+      <div class="rlbl">Sharpe Ratio</div>
+    </div>
+    <div class="rcard">
+      <div class="rval" :class="(risk.sortino||0)>=1?'green':(risk.sortino||0)>=0?'yellow':'red'"
+           x-text="(risk.sortino||0).toFixed(2)">—</div>
+      <div class="rlbl">Sortino Ratio</div>
+    </div>
+    <div class="rcard">
+      <div class="rval" :class="(risk.calmar||0)>=1?'green':(risk.calmar||0)>=0?'yellow':'red'"
+           x-text="(risk.calmar||0).toFixed(2)">—</div>
+      <div class="rlbl">Calmar Ratio</div>
+    </div>
+    <div class="rcard">
+      <div class="rval red" x-text="(risk.maxDrawdownPct||0).toFixed(1)+'%'">—</div>
+      <div class="rlbl">Max Drawdown</div>
+    </div>
+    <div class="rcard">
+      <div class="rval" :class="(risk.profitFactor||0)>=1?'green':'red'"
+           x-text="(risk.profitFactor||0).toFixed(2)">—</div>
+      <div class="rlbl">Profit Factor</div>
+    </div>
+    <div class="rcard">
+      <div class="rval cyan"
+           x-text="risk.avgDurationHours!=null?(risk.avgDurationHours||0).toFixed(1)+'h':'—'">—</div>
+      <div class="rlbl">Avg Duration</div>
+    </div>
+    <div class="rcard" style="grid-column:span 2">
+      <div style="display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:.75rem;padding:.2rem 0">
+        <span class="streak-pill" :class="streaks.currentType==='win'?'streak-win':streaks.currentType==='loss'?'streak-loss':'streak-none'">
+          Current:
+          <span x-text="streaks.currentType==='win'?'🔥 '+streaks.current+'W':streaks.currentType==='loss'?'❄️ '+streaks.current+'L':'—'"></span>
+        </span>
+        <span class="streak-pill streak-win">Best: <span x-text="streaks.longestWin+'W'"></span></span>
+        <span class="streak-pill streak-loss">Worst: <span x-text="streaks.longestLoss+'L'"></span></span>
+      </div>
+      <div class="rlbl" style="text-align:center;margin-top:.5rem">Win/Loss Streaks</div>
+    </div>
+  </div>
+
+  <!-- FORECAST CALIBRATION -->
+  <div class="sec">Forecast Calibration</div>
+  <div class="cg2">
+    <div class="card cc">
+      <div class="ct">Predicted vs Actual Win Rate per Prob Bin</div>
+      <div x-show="calibration && calibration.length>0" id="ch-calibration"></div>
+      <div x-show="!calibration || calibration.length===0" class="calib-empty">
+        Nessun dato calibration — servono trade settled con forecast_prob
+      </div>
+    </div>
+    <div class="card cc">
+      <div class="ct">Edge Distribution: BUY_YES vs BUY_NO</div>
+      <div id="ch-edge-dist"></div>
+    </div>
+  </div>
+
+  <!-- CONFIG VS GOLDEN -->
+  <div class="sec">Config vs Golden Config</div>
+  <div class="card" style="padding:1.15rem;margin-bottom:.9rem">
+    <table class="cfg-tbl">
+      <thead><tr><th>Parametro</th><th>Attuale</th><th>Golden</th><th>Delta</th></tr></thead>
+      <tbody>
+        <template x-for="[k,gv] in Object.entries(golden)" :key="k">
+          <tr>
+            <td style="color:var(--text2)" x-text="k.replace(/_/g,' ')"></td>
+            <td :class="cfg[k] && cfg[k]!=gv?'cfg-warn':'cfg-ok'" x-text="cfg[k]||'—'"></td>
+            <td style="color:var(--text3)" x-text="gv"></td>
+            <td>
+              <span x-show="cfg[k] && cfg[k]!=gv" class="bdg bl">DRIFT</span>
+              <span x-show="!cfg[k]||cfg[k]==gv" class="bdg bw">OK</span>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </div>
+
   <!-- CONFIG PARAMS -->
   <div class="sec">Parametri Algo Attivi</div>
   <div class="card" style="padding:1.15rem;margin-bottom:.9rem">
@@ -506,10 +717,18 @@ function dash(){
        no_win_rate:0,yes_win_rate:0,no_trades:0,yes_trades:0,
        avg_edge:0,net_pnl_usd:0,gross_profit_usd:0,gross_loss_usd:0,
        bankroll_series:[],by_category:{},trader_pid:null},
+    paper:{current_balance_usd:0,starting_balance_usd:100,open_positions:0},
     trades:[],roi:[],cfg:{},upd:'—',_ch:{},
     cycles:[],daily:[],hourly:[],cycleHourly:[],
+    calibration:[],streaks:{longestWin:0,longestLoss:0,current:0,currentType:'none'},
+    risk:{sharpe:0,sortino:0,calmar:0,maxDrawdownPct:0,profitFactor:0,avgDurationHours:null},
+    edgeDist:{yes:[],no:[]},
 
-    init(){ this.refresh(); setInterval(()=>this.refresh(),30000); },
+    // GOLDEN CONFIG for comparison
+    golden:{MIN_EDGE_BUY_NO:'3%',MIN_EDGE_BUY_YES:'8%',KELLY_FRACTION:'0.25',
+            MAX_BET_CENTS:'500',MAX_POSITIONS:'15',DAILY_LOSS_LIMIT_CENTS:'500'},
+
+    init(){ this.refresh(); setInterval(()=>this.refresh(),15000); },
 
     toggleDark(){
       this.dark=!this.dark;
@@ -519,18 +738,23 @@ function dash(){
 
     async refresh(){
       try{
-        const [m,roi,tr,cfg,cycles,daily,hourly,cycleHourly]=await Promise.all([
-          fetch('/api/metrics').then(r=>r.json()),
-          fetch('/api/roi_series').then(r=>r.json()),
-          fetch('/api/trades').then(r=>r.json()),
-          fetch('/api/config').then(r=>r.json()),
-          fetch('/api/cycle_series').then(r=>r.json()),
-          fetch('/api/daily_stats').then(r=>r.json()),
+        const d=await fetch('/api/all').then(r=>r.json());
+        this.m=d.metrics;
+        this.roi=d.roi_series||[];
+        this.trades=d.trades||[];
+        this.cfg=d.config||{};
+        this.cycles=d.cycle_series||[];
+        this.daily=d.daily_stats||[];
+        this.paper=d.paper_state||this.paper;
+        this.calibration=d.calibration||[];
+        this.streaks=d.streaks||this.streaks;
+        this.risk=d.risk||this.risk;
+        this.edgeDist=d.edge_dist||this.edgeDist;
+        // hourly comes from daily_stats; cycle_hourly needs separate fetch
+        const [hourly,cycleHourly]=await Promise.all([
           fetch('/api/hourly_distribution').then(r=>r.json()),
           fetch('/api/cycle_hourly').then(r=>r.json()),
         ]);
-        this.m=m; this.roi=roi; this.trades=tr; this.cfg=cfg;
-        this.cycles=cycles; this.daily=daily;
         this.hourly=hourly; this.cycleHourly=cycleHourly;
         this.upd=new Date().toLocaleTimeString('it-IT');
         this.$nextTick(()=>this.charts());
@@ -759,6 +983,51 @@ function dash(){
             }}},
           });
         }
+      }
+
+      /* Forecast Calibration */
+      const cal=this.calibration||[];
+      if(cal.length){
+        this.mk('ch-calibration',{...b,
+          chart:{...b.chart,type:'bar',height:230},
+          series:[
+            {name:'Predicted %',data:cal.map(c=>c.predicted)},
+            {name:'Actual WR %',data:cal.map(c=>c.actual)},
+          ],
+          xaxis:{...b.xaxis,categories:cal.map(c=>c.bin),
+                 labels:{...b.xaxis.labels,rotate:-30,maxHeight:60}},
+          colors:['#94a3b8','#10b981'],
+          plotOptions:{bar:{borderRadius:3,columnWidth:'70%'}},
+          yaxis:{...b.yaxis,max:100,labels:{...b.yaxis.labels,formatter:v=>v+'%'}},
+          tooltip:{y:{formatter:v=>v.toFixed(1)+'%'}},
+          annotations:{yaxis:[{y:50,borderColor:'#f59e0b',strokeDashArray:4,
+            label:{text:'50%',style:{background:'rgba(245,158,11,.1)',color:'#f59e0b',fontSize:'9px'}}}]},
+        });
+      }
+
+      /* Edge Distribution by Action */
+      const ed=this.edgeDist||{};
+      const yBkts=(ed.yes||[]).map(b2=>b2.count);
+      const nBkts=(ed.no||[]).map(b2=>b2.count);
+      const eBins=(ed.yes||ed.no||[]).map(b2=>b2.bucket);
+      if(eBins.length){
+        this.mk('ch-edge-dist',{...b,
+          chart:{...b.chart,type:'bar',height:230},
+          series:[
+            {name:'BUY_YES',data:yBkts},
+            {name:'BUY_NO', data:nBkts},
+          ],
+          xaxis:{...b.xaxis,categories:eBins,
+                 labels:{...b.xaxis.labels,rotate:-30,maxHeight:60}},
+          colors:['#10b981','#ef4444'],
+          plotOptions:{bar:{borderRadius:3,columnWidth:'65%'}},
+          yaxis:{...b.yaxis,labels:{...b.yaxis.labels,formatter:v=>v}},
+          tooltip:{y:{formatter:(v,{seriesIndex:si,dataPointIndex:di})=>{
+            const src=si===0?(ed.yes||[]):(ed.no||[]);
+            const wr=(src[di]||{}).win_rate||0;
+            return v+' trades (WR '+wr+'%)';
+          }}},
+        });
       }
     },
   };
