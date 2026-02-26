@@ -772,5 +772,5 @@ def dashboard():
     return render_template_string(HTML)
 
 if __name__ == "__main__":
-    print("🚀 Kalshi Dashboard → http://localhost:8888")
-    app.run(host="::", port=8888, debug=False)
+    print("🚀 Kalshi Dashboard → http://localhost:8887")
+    app.run(host="::", port=8887, debug=False)

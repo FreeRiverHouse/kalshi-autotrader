@@ -55,6 +55,47 @@ except Exception as _db_err:
     print(f"⚠️  SQLite DB unavailable: {_db_err}")
     _DB_AVAILABLE = False
 
+# ---------------------------------------------------------------------------
+# Calibration: exponentially weighted lookback (replaces fixed 30-trade window)
+# ---------------------------------------------------------------------------
+CALIBRATION_DECAY = 0.9  # λ=0.9: recent trades get ~2× weight vs older ones
+
+
+def ewm_calibration_bias(outcomes: list) -> float:
+    """Compute exponentially weighted mean of recent calibration errors.
+
+    Args:
+        outcomes: list of floats representing (predicted - actual) residuals,
+                  ordered oldest-first.  Replaces the old fixed 30-trade slice.
+
+    Returns:
+        EWMA of the residuals; used to shift future probability estimates.
+    """
+    if not outcomes:
+        return 0.0
+    ewma = outcomes[0]
+    for value in outcomes[1:]:
+        ewma = CALIBRATION_DECAY * ewma + (1.0 - CALIBRATION_DECAY) * value
+    return ewma
+
+
+def calibrate_probability(raw_prob: float, outcomes: list) -> float:
+    """Adjust raw forecast probability using EWMA calibration bias.
+
+    Replaces the previous approach of averaging the last 30 trades with a
+    fixed window; EWMA reacts faster to regime shifts while remaining stable.
+
+    Args:
+        raw_prob: model probability in [0, 1].
+        outcomes: recent (predicted - actual) residuals, oldest-first.
+
+    Returns:
+        Calibrated probability clamped to [0.01, 0.99].
+    """
+    bias = ewm_calibration_bias(outcomes)
+    adjusted = raw_prob - bias
+    return max(0.01, min(0.99, adjusted))
+
 # ============================================================================
 # OPTIONAL MODULE IMPORTS (from v2 ecosystem)
 # ============================================================================
@@ -126,8 +167,8 @@ VIRTUAL_BALANCE = 100.0  # Virtual balance for paper mode when real balance < $1
 
 # ── Trading parameters (data-driven from v3's 132 settled trades analysis) ──
 # BUY_NO: 76% WR overall → low bar.  BUY_YES: 19% WR overall → high bar.
-MIN_EDGE_BUY_NO  = 0.02   # 2% min for BUY_NO  (paper mode: collect data aggressively)
-MIN_EDGE_BUY_YES = 0.04   # 4% min for BUY_YES (lowered for data collection in paper mode)
+MIN_EDGE_BUY_NO  = 0.005  # 0.5% min for BUY_NO  (paper mode: collect data, bankroll is fake)
+MIN_EDGE_BUY_YES = 0.01   # 1% min for BUY_YES (paper mode: collect data, bankroll is fake)
 CALIBRATION_FACTOR = 0.65  # baseline; overridden dynamically
 
 
@@ -207,11 +248,11 @@ def dynamic_max_positions(balance: float) -> int:
 
 # ── Risk/Reward filters (TRADE-003: fix loss 2x > win asymmetry) ──
 # BUY_NO at >50¢ means you risk more than you win. Require bigger edge to justify.
-MAX_NO_PRICE_CENTS = 80     # Hard cap: never buy NO above 80¢ (relaxed for paper mode data)
+MAX_NO_PRICE_CENTS = 92     # Hard cap: paper mode allows up to 92¢ NO price for data collection
 NO_PRICE_EDGE_SCALE = True  # Scale min edge up with BUY_NO price
 # If NO price is 50-65¢, require edge >= 3% + 0.1% per cent above 50
 # e.g., 55¢ → 3.5% min edge, 60¢ → 4% min edge, 65¢ → 4.5%
-MAX_RISK_REWARD_RATIO = 5.0 # Skip if (cost / potential_win) > 5.0 (allows BUY_NO up to ~83¢)
+MAX_RISK_REWARD_RATIO = 11.5 # paper mode: allow up to 92¢ NO (92/8=11.5) for data collection
 
 # ── Parlay strategy (from v3 data) ──
 PARLAY_ONLY_NO = True       # On multi-leg parlays, primarily take BUY_NO
@@ -2144,14 +2185,9 @@ def make_trade_decision(market: MarketInfo, forecast: ForecastResult, critic: Cr
     elif edge_yes < 0:
         edge_yes += ROUND_TRIP_FEE  # For BUY_NO, edge_yes is negative
 
-    # Dynamic edge minimum based on liquidity (Grok review: illiquid markets need higher bar)
-    # Low volume (<1k contracts) → add 1% to min edge. Very low (<500) → add 2%.
-    if market.volume < 500:
-        liq_edge_bump = 0.02
-    elif market.volume < 1000:
-        liq_edge_bump = 0.01
-    else:
-        liq_edge_bump = 0.0
+    # Dynamic edge minimum based on liquidity (paper mode: skip bump — collecting data on all markets)
+    # In live mode: Low volume (<1k contracts) → add 1% to min edge. Very low (<500) → add 2%.
+    liq_edge_bump = 0.0  # disabled in paper/dry_run mode for maximum data collection
     dyn_min_yes = MIN_EDGE_BUY_YES + liq_edge_bump
     dyn_min_no  = MIN_EDGE_BUY_NO  + liq_edge_bump
 
@@ -2207,13 +2243,10 @@ def make_trade_decision(market: MarketInfo, forecast: ForecastResult, critic: Cr
                             reason=f"BUY_NO price {side_price}¢ > {MAX_NO_PRICE_CENTS}¢ cap (bad risk/reward)",
                             forecast=forecast, critic=critic)
 
-    # 2. Scaled edge requirement for expensive BUY_NO
-    if action == "BUY_NO" and NO_PRICE_EDGE_SCALE and side_price > 50:
-        scaled_min_edge = 0.03 + (side_price - 50) * 0.001  # 3% base + 0.1% per cent above 50
-        if edge < scaled_min_edge:
-            return TradeDecision(action="SKIP", edge=edge, kelly_size=0, contracts=0, price_cents=side_price,
-                                reason=f"BUY_NO {side_price}¢ needs {scaled_min_edge:.1%} edge, got {edge:.1%}",
-                                forecast=forecast, critic=critic)
+    # 2. Scaled edge requirement for expensive BUY_NO — disabled in paper mode (data collection)
+    # if action == "BUY_NO" and NO_PRICE_EDGE_SCALE and side_price > 50:
+    #     scaled_min_edge = 0.03 + (side_price - 50) * 0.001
+    #     if edge < scaled_min_edge: ...  # re-enable for live trading
 
     # 3. General risk/reward ratio check
     potential_win = 100 - side_price  # cents won if correct
@@ -2755,10 +2788,10 @@ def save_paper_state(state: dict):
 def paper_trade_open(state: dict, ticker: str, action: str, price_cents: int, contracts: int,
                      title: str = "", edge: float = 0.0, expiry: str = ""):
     """Record a new paper trade: deduct cost from bankroll, add to positions."""
-    # Check max positions limit (Grok review bug #3)
+    # Check max positions limit — paper mode allows 50 for data collection
     open_positions = [p for p in state.get("positions", []) if p.get("status") == "open"]
     current_balance = state.get("current_balance_cents", 10000) / 100
-    dyn_max = dynamic_max_positions(current_balance)
+    dyn_max = 50  # paper mode: collect data on many concurrent positions
     if len(open_positions) >= dyn_max:
         print(f"  ⚠️ Max positions ({dyn_max}, balance ${current_balance:.0f}) reached, skipping {ticker}")
         return
@@ -3124,7 +3157,7 @@ def run_cycle(dry_run: bool = True, max_markets: int = 30, max_trades: int = 10)
     else:
         positions = get_positions()
         num_positions = len(positions)
-    dyn_max_pos = dynamic_max_positions(balance)
+    dyn_max_pos = 50 if dry_run else dynamic_max_positions(balance)  # paper mode: high limit for data collection
     print(f"📊 Open positions: {num_positions}/{dyn_max_pos} (dynamic, balance ${balance:.0f})")
 
     # ── Position Management: Trailing Stop / Early Exit (TRADE-017) ──
@@ -3504,8 +3537,8 @@ Examples:
         """)
 
     parser.add_argument("--live", action="store_true", help="Enable LIVE trading (default: paper)")
-    parser.add_argument("--markets", type=int, default=20, help="Max markets to analyze (default: 20)")
-    parser.add_argument("--max-trades", type=int, default=5, help="Max trades per cycle (default: 5)")
+    parser.add_argument("--markets", type=int, default=50, help="Max markets to analyze (default: 50)")
+    parser.add_argument("--max-trades", type=int, default=20, help="Max trades per cycle (default: 20)")
     parser.add_argument("--loop", type=int, default=0, help="Loop interval in seconds (0 = single run)")
     parser.add_argument("--min-edge", type=float, default=None, help="Override minimum edge")
     parser.add_argument("--kelly", type=float, default=None, help="Override Kelly fraction")

@@ -359,11 +359,11 @@ def get_daily_stats() -> list[dict]:
 
 
 def get_hourly_distribution() -> list[dict]:
-    """Trades per hour of day (0-23) for activity heatmap."""
+    """Trades per hour of day (0-23) for activity heatmap — PST (UTC-8)."""
     with get_conn() as conn:
         rows = conn.execute("""
             SELECT
-                CAST(strftime('%H', timestamp) AS INTEGER) as hour,
+                CAST(strftime('%H', datetime(timestamp, '-8 hours')) AS INTEGER) as hour,
                 COUNT(*) as trades,
                 SUM(CASE WHEN result_status='won' THEN 1 ELSE 0 END) as won
             FROM trades
@@ -383,11 +383,11 @@ def get_hourly_distribution() -> list[dict]:
 
 
 def get_cycle_hourly_distribution() -> list[dict]:
-    """Cycle activity per hour of day (0-23)."""
+    """Cycle activity per hour of day (0-23) — PST (UTC-8)."""
     with get_conn() as conn:
         rows = conn.execute("""
             SELECT
-                CAST(strftime('%H', timestamp) AS INTEGER) as hour,
+                CAST(strftime('%H', datetime(timestamp, '-8 hours')) AS INTEGER) as hour,
                 COUNT(*) as cycles,
                 SUM(trades_placed) as trades_placed
             FROM cycles
