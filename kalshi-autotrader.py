@@ -3180,6 +3180,27 @@ def run_cycle(dry_run: bool = True, max_markets: int = 30, max_trades: int = 10)
 
     if num_positions >= dyn_max_pos:
         print("⚠️ Max positions reached")
+        # Still log the cycle and save paper state so dashboard stays updated
+        duration = time.time() - cycle_start
+        if dry_run:
+            try:
+                ps = load_paper_state()
+                save_paper_state(ps)
+            except Exception:
+                pass
+        log_cycle({
+            "dry_run": dry_run,
+            "duration_s": round(duration, 1),
+            "markets_scanned": 0,
+            "markets_analyzed": 0,
+            "trades_executed": 0,
+            "trades_skipped": 0,
+            "tokens": 0,
+            "balance": balance,
+            "positions": num_positions,
+            "skipped_reason": "max_positions",
+        })
+        structured_log("cycle_end", {"skipped": True, "reason": "max_positions", "positions": num_positions})
         return
 
     # ── GROK-TRADE-002: Drawdown & exposure alerts ──
