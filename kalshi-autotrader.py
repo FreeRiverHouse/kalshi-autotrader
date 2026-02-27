@@ -272,7 +272,7 @@ HARD_STOP_LOSS_PCT = -0.30   # Hard stop: exit if position is -30% or worse
 # ── Market scanning filters ──
 MIN_VOLUME = 200
 MIN_LIQUIDITY = 1000
-MAX_DAYS_TO_EXPIRY = 7   # Focus on markets resolving within 1 week → fast feedback for adaptive loop
+MAX_DAYS_TO_EXPIRY = 30  # Kalshi sets close_time 14d even for tonight's NBA games (admin settlement window)
 MIN_DAYS_TO_EXPIRY = 0.02  # ~30 minutes
 MIN_PRICE_CENTS = 5
 MAX_PRICE_CENTS = 50   # Grok rec C: raise to 50¢ for more volume (breakeven WR = 50%)
@@ -2391,6 +2391,23 @@ def score_market(market: MarketInfo) -> float:
         score += 8   # Crypto always gets boosted
         if dte < 0.1:
             score += 5  # Hourly crypto: absolute top priority
+    # Sports: Kalshi sets close_time 14d even for tonight's games (admin window).
+    # Parse the GAME DATE from the ticker (format: KXNBA...-DDMMMYY...) to detect tonight.
+    # Example: KXNBATOTAL-26FEB26HOUORL → game date 26 Feb 2026
+    import re as _re
+    m = _re.search(r'-(\d{2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)(\d{2})', ticker)
+    if m:
+        _months = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,
+                   "JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}
+        try:
+            game_date = datetime(2000+int(m.group(3)), _months[m.group(2)], int(m.group(1)), tzinfo=timezone.utc)
+            days_to_game = (game_date.date() - datetime.now(timezone.utc).date()).days
+            if days_to_game == 0:   score += 15  # Tonight's game — resolves in hours!
+            elif days_to_game == 1: score += 8   # Tomorrow's game
+            elif days_to_game <= 3: score += 3   # This week
+            elif days_to_game > 7:  score -= 8   # Future game >1 week: penalize hard
+        except Exception:
+            pass
     return score
 
 
