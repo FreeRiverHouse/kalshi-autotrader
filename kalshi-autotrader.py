@@ -167,8 +167,8 @@ VIRTUAL_BALANCE = 100.0  # Virtual balance for paper mode when real balance < $1
 
 # ── Trading parameters (data-driven from v3's 132 settled trades analysis) ──
 # BUY_NO: 76% WR overall → low bar.  BUY_YES: 19% WR overall → high bar.
-MIN_EDGE_BUY_NO  = 0.03   # 3% min for BUY_NO  (golden config — was 0.5% paper mode, too loose)
-MIN_EDGE_BUY_YES = 0.08   # 8% min for BUY_YES (golden config — YES has 29% WR, needs high bar)
+MIN_EDGE_BUY_NO  = 0.02   # 2% min for BUY_NO  (paper mode: generate volume for adaptive learning)
+MIN_EDGE_BUY_YES = 0.05   # 5% min for BUY_YES (paper mode: cap is 6%, so >8% was basically never firing)
 CALIBRATION_FACTOR = 0.65  # legacy: kept for dynamic calibration baseline
 CALIBRATION_FACTOR_YES = 0.40  # YES is systematically overconfident → shrink hard toward 50%
 CALIBRATION_FACTOR_NO  = 0.70  # NO works well (75.9% WR) → light shrink
@@ -3357,15 +3357,18 @@ def run_cycle(dry_run: bool = True, max_markets: int = 30, max_trades: int = 10)
     total_tokens = 0
     existing_tickers = {p.get("ticker", "") for p in positions}
 
-    # Dedup from trade log (paper mode)
+    # Dedup: in paper mode only block tickers traded in the last 2 hours
+    # (not full history — hourly crypto markets recycle every hour!)
     if dry_run and TRADE_LOG_FILE.exists():
         try:
+            cutoff = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
             with open(TRADE_LOG_FILE) as f:
                 for line in f:
                     try:
                         e = json.loads(line.strip())
                         if e.get("action") in ("BUY_YES", "BUY_NO") and e.get("dry_run"):
-                            existing_tickers.add(e.get("ticker", ""))
+                            if e.get("timestamp", "") >= cutoff:
+                                existing_tickers.add(e.get("ticker", ""))
                     except Exception:
                         continue
         except Exception:
