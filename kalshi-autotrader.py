@@ -167,11 +167,11 @@ VIRTUAL_BALANCE = 100.0  # Virtual balance for paper mode when real balance < $1
 
 # ── Trading parameters (data-driven from v3's 132 settled trades analysis) ──
 # BUY_NO: 76% WR overall → low bar.  BUY_YES: 19% WR overall → high bar.
-MIN_EDGE_BUY_NO  = 0.02   # 2% min for BUY_NO  (paper mode: generate volume for adaptive learning)
-MIN_EDGE_BUY_YES = 0.05   # 5% min for BUY_YES (paper mode: cap is 6%, so >8% was basically never firing)
+MIN_EDGE_BUY_NO  = 0.03   # 3% min — 2% let in 40-50% WR trash at 50-60c
+MIN_EDGE_BUY_YES = 0.05   # 5% min for BUY_YES (cap is 6%)
 CALIBRATION_FACTOR = 0.65  # legacy: kept for dynamic calibration baseline
-CALIBRATION_FACTOR_YES = 0.40  # YES is systematically overconfident → shrink hard toward 50%
-CALIBRATION_FACTOR_NO  = 0.70  # NO works well (75.9% WR) → light shrink
+CALIBRATION_FACTOR_YES = 0.40  # YES miscalibrated → shrink hard
+CALIBRATION_FACTOR_NO  = 0.55  # NO also miscalibrated on sports: 61% WR vs 73% needed → shrink more
 
 
 def _compute_dynamic_calibration_factor(
@@ -251,7 +251,7 @@ def dynamic_max_positions(balance: float) -> int:
 
 # ── Risk/Reward filters (TRADE-003: fix loss 2x > win asymmetry) ──
 # BUY_NO at >50¢ means you risk more than you win. Require bigger edge to justify.
-MAX_NO_PRICE_CENTS = 75     # Hard cap: ≤75¢ NO (was 92¢ — at 92¢ you risk $0.92 to win $0.08)
+MAX_NO_PRICE_CENTS = 68     # Hard cap: ≤68¢ NO — 71-75c bucket had 61% WR, needs 73%+, deeply unprofitable
 NO_PRICE_EDGE_SCALE = True  # Scale min edge up with BUY_NO price
 # If NO price is 50-65¢, require edge >= 3% + 0.1% per cent above 50
 # e.g., 55¢ → 3.5% min edge, 60¢ → 4% min edge, 65¢ → 4.5%
@@ -2391,6 +2391,9 @@ def score_market(market: MarketInfo) -> float:
         score += 8   # Crypto always gets boosted
         if dte < 0.1:
             score += 5  # Hourly crypto: absolute top priority
+    # Multi-game parlay bonus: 87.5% WR historically — structural NO edge (any leg fails = win)
+    if "KXMVESPORTSMULTIGAME" in ticker:
+        score += 10
     # Sports: Kalshi sets close_time 14d even for tonight's games (admin window).
     # Parse the GAME DATE from the ticker (format: KXNBA...-DDMMMYY...) to detect tonight.
     # Example: KXNBATOTAL-26FEB26HOUORL → game date 26 Feb 2026
