@@ -272,7 +272,7 @@ HARD_STOP_LOSS_PCT = -0.30   # Hard stop: exit if position is -30% or worse
 # ── Market scanning filters ──
 MIN_VOLUME = 200
 MIN_LIQUIDITY = 1000
-MAX_DAYS_TO_EXPIRY = 30
+MAX_DAYS_TO_EXPIRY = 7   # Focus on markets resolving within 1 week → fast feedback for adaptive loop
 MIN_DAYS_TO_EXPIRY = 0.02  # ~30 minutes
 MIN_PRICE_CENTS = 5
 MAX_PRICE_CENTS = 50   # Grok rec C: raise to 50¢ for more volume (breakeven WR = 50%)
@@ -2374,18 +2374,23 @@ def score_market(market: MarketInfo) -> float:
         score += min(10, math.log10(market.volume) * 2)
     score += max(0, 10 - abs(market.yes_price - 50) * 0.2)
     dte = market.days_to_expiry
-    if 1 <= dte <= 7: score += 5
-    elif 7 < dte <= 14: score += 3
-    elif 0.1 <= dte < 1: score += 2
-    else: score += 1
+    # PRIORITY: short-expiry = fast feedback = faster adaptive learning
+    # Invert the old logic completely — we want data TODAY, not in 2 weeks
+    if dte < 0.1:       score += 20  # <2.4h: hourly crypto — settles immediately
+    elif dte < 0.5:     score += 15  # <12h: same-day resolution
+    elif dte < 1:       score += 12  # <24h: overnight
+    elif dte <= 2:      score += 8   # 1-2 days: short-term events
+    elif dte <= 7:      score += 3   # 1 week: acceptable
+    elif dte <= 14:     score += 0   # 2 weeks: no bonus (NBA, etc.)
+    else:               score -= 5  # >2 weeks: actively penalized
     if market.open_interest > 0:
         score += min(5, math.log10(market.open_interest + 1) * 1.5)
-    # Crypto bonus: always tradeable, boost for hourly contracts
+    # Crypto bonus: always tradeable 24/7, highest settle frequency
     ticker = market.ticker.upper()
     if any(x in ticker for x in ("KXBTC", "KXETH", "KXSOL")):
-        score += 5  # Crypto markets get priority (trade 24/7)
-        if dte < 0.1:  # Hourly contracts — our bread and butter
-            score += 3
+        score += 8   # Crypto always gets boosted
+        if dte < 0.1:
+            score += 5  # Hourly crypto: absolute top priority
     return score
 
 
