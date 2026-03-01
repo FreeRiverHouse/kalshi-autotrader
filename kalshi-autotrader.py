@@ -165,13 +165,17 @@ BASE_URL = "https://api.elections.kalshi.com"
 DRY_RUN = True  # Paper mode by default. Use --live to override.
 VIRTUAL_BALANCE = 100.0  # Virtual balance for paper mode when real balance < $1
 
-# ── Trading parameters (data-driven from v3's 132 settled trades analysis) ──
-# BUY_NO: 76% WR overall → low bar.  BUY_YES: 19% WR overall → high bar.
-MIN_EDGE_BUY_NO  = 0.03   # 3% min — 2% let in 40-50% WR trash at 50-60c
-MIN_EDGE_BUY_YES = 0.05   # 5% min for BUY_YES (cap is 6%)
+# ── Trading parameters (Grok-tuned 2026-03-01) ──
+# BUY_NO: 66.7% WR +$4.53.  BUY_YES: 39.9% WR -$7.98 → DISABLED (needs 54%+ to break even)
+MIN_EDGE_BUY_NO  = 0.03   # 3% min for BUY_NO
+MIN_EDGE_BUY_YES = 0.20   # EFFECTIVELY DISABLED — needs 20% edge (LLM never reaches this)
 CALIBRATION_FACTOR = 0.65  # legacy: kept for dynamic calibration baseline
-CALIBRATION_FACTOR_YES = 0.40  # YES miscalibrated → shrink hard
-CALIBRATION_FACTOR_NO  = 0.55  # NO also miscalibrated on sports: 61% WR vs 73% needed → shrink more
+CALIBRATION_FACTOR_YES = 0.25  # YES: shrink even harder (Grok: 0.25-0.30)
+CALIBRATION_FACTOR_NO  = 0.62  # NO: let breathe a bit more (Grok: 0.60-0.65)
+
+# ── MULTIGAME special overrides (87.5% WR — golden goose) ──
+MULTIGAME_MIN_EDGE_BUY_NO  = 0.015  # Lower bar for multigame BUY_NO (Grok rec)
+MULTIGAME_MAX_NO_PRICE_CENTS = 80   # Can afford to buy stronger NO favorites in parlays
 
 
 def _compute_dynamic_calibration_factor(
@@ -251,7 +255,7 @@ def dynamic_max_positions(balance: float) -> int:
 
 # ── Risk/Reward filters (TRADE-003: fix loss 2x > win asymmetry) ──
 # BUY_NO at >50¢ means you risk more than you win. Require bigger edge to justify.
-MAX_NO_PRICE_CENTS = 68     # Hard cap: ≤68¢ NO — 71-75c bucket had 61% WR, needs 73%+, deeply unprofitable
+MAX_NO_PRICE_CENTS = 75     # Raised to 75 (Grok rec) — multigame uses MULTIGAME_MAX_NO_PRICE_CENTS=80
 NO_PRICE_EDGE_SCALE = True  # Scale min edge up with BUY_NO price
 # If NO price is 50-65¢, require edge >= 3% + 0.1% per cent above 50
 # e.g., 55¢ → 3.5% min edge, 60¢ → 4% min edge, 65¢ → 4.5%
@@ -272,7 +276,7 @@ HARD_STOP_LOSS_PCT = -0.30   # Hard stop: exit if position is -30% or worse
 # ── Market scanning filters ──
 MIN_VOLUME = 200
 MIN_LIQUIDITY = 1000
-MAX_DAYS_TO_EXPIRY = 30  # Kalshi sets close_time 14d even for tonight's NBA games (admin settlement window)
+MAX_DAYS_TO_EXPIRY = 14  # Grok: ≤14d for sports (less uncertainty); crypto hourly unaffected
 MIN_DAYS_TO_EXPIRY = 0.02  # ~30 minutes
 MIN_PRICE_CENTS = 5
 MAX_PRICE_CENTS = 50   # Grok rec C: raise to 50¢ for more volume (breakeven WR = 50%)
@@ -2195,8 +2199,9 @@ def make_trade_decision(market: MarketInfo, forecast: ForecastResult, critic: Cr
     # Dynamic edge minimum based on liquidity (paper mode: skip bump — collecting data on all markets)
     # In live mode: Low volume (<1k contracts) → add 1% to min edge. Very low (<500) → add 2%.
     liq_edge_bump = 0.0  # disabled in paper/dry_run mode for maximum data collection
+    _is_multigame_pre = any(x in market.ticker.upper() for x in ("MULTIGAME", "COMBO"))
     dyn_min_yes = MIN_EDGE_BUY_YES + liq_edge_bump
-    dyn_min_no  = MIN_EDGE_BUY_NO  + liq_edge_bump
+    dyn_min_no  = (MULTIGAME_MIN_EDGE_BUY_NO if _is_multigame_pre else MIN_EDGE_BUY_NO) + liq_edge_bump
 
     # Split thresholds
     if edge_yes > 0:
@@ -2244,11 +2249,16 @@ def make_trade_decision(market: MarketInfo, forecast: ForecastResult, critic: Cr
     else:
         action, side_price, edge = "BUY_NO", market.no_price, abs(edge_yes)
 
+    # ── MULTIGAME override: lower edge bar + higher price cap (87.5% WR — golden goose) ──
+    is_multigame = any(x in market.ticker.upper() for x in ("MULTIGAME", "COMBO"))
+    effective_max_no_price = MULTIGAME_MAX_NO_PRICE_CENTS if is_multigame else MAX_NO_PRICE_CENTS
+    effective_min_edge_no  = MULTIGAME_MIN_EDGE_BUY_NO if is_multigame else MIN_EDGE_BUY_NO
+
     # ── Risk/Reward filters (TRADE-003) ──
     # 1. Hard cap on BUY_NO price
-    if action == "BUY_NO" and side_price > MAX_NO_PRICE_CENTS:
+    if action == "BUY_NO" and side_price > effective_max_no_price:
         return TradeDecision(action="SKIP", edge=edge, kelly_size=0, contracts=0, price_cents=side_price,
-                            reason=f"BUY_NO price {side_price}¢ > {MAX_NO_PRICE_CENTS}¢ cap (bad risk/reward)",
+                            reason=f"BUY_NO price {side_price}¢ > {effective_max_no_price}¢ cap (bad risk/reward)",
                             forecast=forecast, critic=critic)
 
     # 2. Scaled edge requirement for expensive BUY_NO (re-enabled: data shows bad R/R at high prices)
