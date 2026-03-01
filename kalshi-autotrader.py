@@ -3514,6 +3514,7 @@ def run_cycle(dry_run: bool = True, max_markets: int = 30, max_trades: int = 10)
                                  decision.price_cents, decision.contracts,
                                  title=market.title, edge=decision.edge,
                                  expiry=market.expiry or "")
+                save_paper_state(paper_state)  # FIX: persist to disk every trade
                 print(f"   📊 Paper bankroll: ${paper_state['current_balance_cents']/100:.2f}")
             except Exception as e:
                 print(f"   ⚠️ Paper state update error: {e}")
@@ -3646,6 +3647,35 @@ Examples:
     parser.add_argument("--kelly", type=float, default=None, help="Override Kelly fraction")
 
     args = parser.parse_args()
+
+    # ── Wait for SSD at boot (SSD is always attached but takes time to mount) ──
+    global _DATA_DIR, TRADE_LOG_FILE, V3_TRADE_LOG, CYCLE_LOG_FILE, SKIP_LOG_FILE, \
+           DECISION_LOG_FILE, PAPER_STATE_FILE, AUTOTRADER_LOG_FILE
+    _ssd_check = Path("/Volumes/DATI-SSD/kalshi-logs")
+    if not _ssd_check.exists():
+        print(f"⏳ SSD non montato, aspetto (max 30 min)...")
+        for _attempt in range(36):  # 36 × 5min = 3h max
+            time.sleep(300)  # 5 minuti
+            if _ssd_check.exists():
+                print(f"✅ SSD montato dopo {(_attempt+1)*5} minuti")
+                break
+            print(f"⏳ SSD ancora non montato, riprovo tra 5 min (tentativo {_attempt+1}/36)...")
+        else:
+            print("⚠️ SSD non montato dopo 3h — parto comunque su path locale")
+    if _ssd_check.exists() and _DATA_DIR != _ssd_check:
+        print(f"📦 SSD disponibile — switching data dir a {_ssd_check}")
+        _DATA_DIR         = _ssd_check
+        TRADE_LOG_FILE    = _DATA_DIR / "kalshi-unified-trades.jsonl"
+        V3_TRADE_LOG      = _DATA_DIR / "kalshi-v3-trades.jsonl"
+        CYCLE_LOG_FILE    = _DATA_DIR / "kalshi-unified-cycles.jsonl"
+        SKIP_LOG_FILE     = _DATA_DIR / "kalshi-unified-skips.jsonl"
+        DECISION_LOG_FILE = _DATA_DIR / "kalshi-decisions.jsonl"
+        PAPER_STATE_FILE  = _DATA_DIR / "paper-trade-state.json"
+        AUTOTRADER_LOG_FILE = _DATA_DIR / "kalshi-autotrader.log"
+        # Also update DB path
+        import db as _db_mod
+        _db_mod.DB_PATH = _ssd_check / "trades.db"
+        print(f"📦 DB path: {_db_mod.DB_PATH}")
 
     # Override globals
     global MIN_EDGE, MIN_EDGE_BUY_YES, MIN_EDGE_BUY_NO, KELLY_FRACTION, DRY_RUN
