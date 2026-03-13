@@ -2161,10 +2161,25 @@ def heuristic_critique(market: MarketInfo, forecast: ForecastResult) -> CriticRe
 # TRADER (Kelly + Trade Decision from v3)
 # ============================================================================
 
-def calculate_kelly(prob: float, price_cents: int) -> float:
-    """Kelly criterion for position sizing."""
+def calculate_kelly(prob: float, price_cents: int, edge: float = 0.0) -> float:
+    """Kelly criterion for position sizing - proportional to edge (TASK-006).
+    
+    Scale Kelly linearly with edge: 0% edge = 2% min bet, 20%+ edge = 50% max bet.
+    Falls back to classic Kelly calculation if edge is not provided.
+    """
     if price_cents <= 0 or price_cents >= 100:
         return 0.0
+    
+    # TASK-006: Kelly proportional to edge
+    if edge is not None and edge != 0.0:
+        if edge <= 0:
+            kelly_frac = 0.02  # Minimum data collection bet
+        else:
+            # Scale linearly: edge * 3.0, clamp between 2% and 50%
+            kelly_frac = min(0.50, max(0.02, edge * 3.0))
+        return kelly_frac
+    
+    # Classic Kelly calculation (fallback)
     b = (100 - price_cents) / price_cents
     p = prob
     q = 1 - p
@@ -2286,7 +2301,7 @@ def make_trade_decision(market: MarketInfo, forecast: ForecastResult, critic: Cr
                             forecast=forecast, critic=critic)
 
     # Kelly sizing (PROC-002 Task 5.2: apply vol regime scaling)
-    kelly_frac = calculate_kelly(final_prob if action == "BUY_YES" else (1 - final_prob), side_price)
+    kelly_frac = calculate_kelly(final_prob if action == "BUY_YES" else (1 - final_prob), side_price, edge)
 
     # PROC-002 Task 4.2: Recovery mode — halve Kelly when drawdown > 10%
     if DRAWDOWN_PEAK_BALANCE > 0 and balance < DRAWDOWN_PEAK_BALANCE:
