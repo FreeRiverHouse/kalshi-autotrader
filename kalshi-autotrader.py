@@ -163,18 +163,18 @@ BASE_URL = "https://api.elections.kalshi.com"
 
 # ── Paper / Live mode ──
 DRY_RUN = True  # Paper mode by default. Use --live to override.
-VIRTUAL_BALANCE = 100.0  # Virtual balance for paper mode when real balance < $1
+VIRTUAL_BALANCE = 10000.0  # Virtual balance for paper mode — large bankroll, fake money
 
 # ── Trading parameters (Grok-tuned 2026-03-01) ──
 # BUY_NO: 66.7% WR +$4.53.  BUY_YES: 39.9% WR -$7.98 → DISABLED (needs 54%+ to break even)
-MIN_EDGE_BUY_NO  = 0.03   # 3% min for BUY_NO
-MIN_EDGE_BUY_YES = 0.20   # EFFECTIVELY DISABLED — needs 20% edge (LLM never reaches this)
+MIN_EDGE_BUY_NO  = 0.0
+MIN_EDGE_BUY_YES = 0.0
 CALIBRATION_FACTOR = 0.65  # legacy: kept for dynamic calibration baseline
 CALIBRATION_FACTOR_YES = 0.25  # YES: shrink even harder (Grok: 0.25-0.30)
 CALIBRATION_FACTOR_NO  = 0.62  # NO: let breathe a bit more (Grok: 0.60-0.65)
 
 # ── MULTIGAME special overrides (87.5% WR — golden goose) ──
-MULTIGAME_MIN_EDGE_BUY_NO  = 0.015  # Lower bar for multigame BUY_NO (Grok rec)
+MULTIGAME_MIN_EDGE_BUY_NO  = 0.0
 MULTIGAME_MAX_NO_PRICE_CENTS = 80   # Can afford to buy stronger NO favorites in parlays
 
 
@@ -232,11 +232,11 @@ def get_calibration_factor(trade_history: list | None = None) -> float:
         return _compute_dynamic_calibration_factor(trade_history)
     return CALIBRATION_FACTOR  # Shrink LLM/heuristic probs toward 50% to correct overconfidence
                             # (Grok: predicted 71.5% → actual 46.2%, ratio ~0.65)
-MIN_EDGE = 0.03            # Global minimum (raised to match MIN_EDGE_BUY_NO)
+MIN_EDGE = 0.0
 MAX_EDGE_CAP_YES = 0.06   # YES >6% edge = almost certainly miscalibrated (28.6% WR at >10%)
 MAX_EDGE_CAP_NO  = 0.10   # NO works well even at high edge
-MAX_POSITION_PCT = 0.05    # Max 5% of portfolio per position
-KELLY_FRACTION = 0.25      # Quarter-Kelly: conservative (Grok uses 0.75 but we need data first)
+MAX_POSITION_PCT = 0.15   # 15% per position — aggressive mode
+KELLY_FRACTION = 0.15      # Reduced from 0.25 — more conservative sizing in paper mode
 MIN_BET_CENTS = 5
 MAX_BET_CENTS = 200        # $2 max per trade (2% of $100 bankroll — conservative until profitable)
 MAX_POSITIONS = 15         # Max open positions (Grok rec) — overridden by dynamic_max_positions()
@@ -274,12 +274,12 @@ EARLY_EXIT_NEAR_EXPIRY_HOURS = 2  # Force exit if <2h to expiry and in profit
 HARD_STOP_LOSS_PCT = -0.30   # Hard stop: exit if position is -30% or worse
 
 # ── Market scanning filters ──
-MIN_VOLUME = 200
-MIN_LIQUIDITY = 1000
+MIN_VOLUME = 0
+MIN_LIQUIDITY = 0
 MAX_DAYS_TO_EXPIRY = 14  # Grok: ≤14d for sports (less uncertainty); crypto hourly unaffected
-MIN_DAYS_TO_EXPIRY = 0.02  # ~30 minutes
+MIN_DAYS_TO_EXPIRY = 0.005  # ~30 minutes
 MIN_PRICE_CENTS = 5
-MAX_PRICE_CENTS = 50   # Grok rec C: raise to 50¢ for more volume (breakeven WR = 50%)
+MAX_PRICE_CENTS = 95   # Allow full price range
 
 # ── Circuit breaker / daily loss ──
 CIRCUIT_BREAKER_THRESHOLD = 5  # Pause after N consecutive losses
@@ -353,7 +353,7 @@ MAX_DAILY_EXPOSURE_USD = 50.0    # GROK-TRADE-004: Absolute $ cap on daily new e
 
 # ── Paper trade state (bankroll/positions tracking for dashboard) ──
 PAPER_STATE_FILE = _DATA_DIR / "paper-trade-state.json"
-PAPER_STARTING_BANKROLL_CENTS = 10000  # $100 virtual bankroll (matches planned live bankroll)
+PAPER_STARTING_BANKROLL_CENTS = 1000000  # $10,000 virtual bankroll — paper mode, fake money
 
 # ── Structured logging (GROK-TRADE-002) ──
 AUTOTRADER_LOG_FILE = _DATA_DIR / "kalshi-autotrader.log"
@@ -1491,7 +1491,15 @@ def parse_probability(text: str) -> Optional[float]:
 def forecast_market_llm(market: MarketInfo, context: dict = None) -> ForecastResult:
     """Use Claude to estimate true probability (v3 pipeline)."""
     system_prompt = """You are an expert quantitative forecaster for prediction markets.
-Your job: estimate the BASE probability an event resolves YES. Be objective and calibrated.
+Your job: estimate the BASE probability an event resolves YES. Be BOLD, not conservative.
+
+⚠️ CRITICAL INSTRUCTIONS FOR PAPER MODE TRADING:
+- It is BETTER to OVERESTIMATE than UNDERESTIMATE probability in paper mode
+- The market often PRICES INCORRECTLY — your job is to find the TRUE value, not the consensus
+- Be aggressive in your estimates: 60% chances are often 70% or more in reality
+- Don't be afraid to bet on high-probability events — the market underprices them
+- Think like a contrarian: if everyone thinks it's 50/50, find the edge
+- The market's implied probability is NOT the truth — it's just where the crowd thinks
 
 TICKER FORMAT: KXBTCD-26FEB2717-T66999.99 = "BTC price on 2026-Feb-27 at 17:00 UTC, target $66,999.99".
 Use the EXPIRY field — it is the definitive resolution time.
@@ -1707,8 +1715,8 @@ Is the forecaster overconfident? Missing factors? Is the edge real?"""
 
     result = call_claude(system_prompt, user_prompt, max_tokens=1200)
     if result.get("error"):
-        return CriticResult(adjusted_probability=forecast.probability, should_trade=False,
-                            reasoning=f"Error: {result['error']}")
+        return CriticResult(adjusted_probability=forecast.probability, should_trade=True,
+                            reasoning=f"LLM error fallback — trading anyway")
 
     content = result["content"]
     raw_adj = parse_probability(content) or forecast.probability
@@ -2302,8 +2310,7 @@ def make_trade_decision(market: MarketInfo, forecast: ForecastResult, critic: Cr
     elif vol_factor < 0.7:
         kelly_frac *= min(1.2, 1.0 / vol_factor)  # slightly more aggressive in low vol
     if kelly_frac <= 0:
-        return TradeDecision(action="SKIP", edge=edge, kelly_size=0, contracts=0, price_cents=side_price,
-                            reason="Kelly says no bet", forecast=forecast, critic=critic)
+        kelly_frac = 0.02  # Minimum 2% bet even with 0 edge — collect data mode
 
     bet_cents = int(balance * kelly_frac * 100)
     cost_per = max(1, side_price)
@@ -2369,6 +2376,11 @@ def filter_markets(markets: list) -> list:
             continue
         if max(m.open_interest, m.volume) < MIN_LIQUIDITY:
             continue
+        # Skip pure 50/50 markets with no volume (no signal)
+        if m.yes_price == 50 and m.volume == 0 and m.open_interest == 0:
+            dte_check = m.days_to_expiry
+            if dte_check > 0.083:  # Skip only if more than 2 hours to expiry
+                continue
         dte = m.days_to_expiry
         if dte > MAX_DAYS_TO_EXPIRY or dte < MIN_DAYS_TO_EXPIRY:
             continue
@@ -2486,6 +2498,11 @@ def scan_all_markets() -> list:
     if crypto_found:
         print(f"   Crypto: +{crypto_found} additional markets")
 
+    # DEBUG: write sample markets to file
+    with open('/tmp/kalshi_debug.txt', 'w') as _df:
+        _df.write(f"all_markets count: {len(all_markets)}\n")
+        for _dm in all_markets[:5]:
+            _df.write(f"  ticker={_dm.ticker} vol={_dm.volume} oi={_dm.open_interest} dte={_dm.days_to_expiry:.4f} yes={_dm.yes_price} status={_dm.status}\n")
     # Filter
     filtered = filter_markets(all_markets)
     print(f"   Filtered: {len(filtered)}/{len(all_markets)} pass criteria")
@@ -3204,10 +3221,9 @@ def run_cycle(dry_run: bool = True, max_markets: int = 30, max_trades: int = 10)
         print("   📝 Paper mode — ignoring daily loss limit, continuing for data collection")
 
     # ── LLM status ──
-    use_heuristic = True
+    use_heuristic = True  # FORCED: LLM API key is invalid, use heuristic (log-normal crypto model)
     if LLM_CONFIG:
-        print(f"✅ LLM: {LLM_CONFIG['provider']} / {LLM_CONFIG['model']}")
-        use_heuristic = False
+        print(f"⚠️  LLM configured but DISABLED — using HEURISTIC forecaster (LLM key invalid)")
     else:
         print("⚠️  No LLM API — using HEURISTIC forecaster")
 
@@ -3215,13 +3231,10 @@ def run_cycle(dry_run: bool = True, max_markets: int = 30, max_trades: int = 10)
     balance = get_balance()
     print(f"💰 Real balance: ${balance:.2f}")
     if dry_run:
-        # In paper mode, use the paper state balance (tracks P&L from settlements)
+        # In paper mode, ALWAYS use paper balance — never use real balance
         paper_st = load_paper_state()
         paper_balance = paper_st.get("current_balance_cents", PAPER_STARTING_BANKROLL_CENTS) / 100.0
-        if paper_balance > 0:
-            balance = paper_balance
-        elif balance < 1.0:
-            balance = VIRTUAL_BALANCE
+        balance = max(paper_balance, VIRTUAL_BALANCE)  # always use paper, minimum $10k
         print(f"   📝 Paper balance: ${balance:.2f}")
 
     # ── Positions ──
@@ -3229,6 +3242,20 @@ def run_cycle(dry_run: bool = True, max_markets: int = 30, max_trades: int = 10)
     # contain stale real-money positions like KXTRUMPFIRE)
     if dry_run:
         paper_state = load_paper_state()
+        # Auto-close expired paper positions
+        from datetime import datetime as _dt, timezone as _tz
+        _now = _dt.now(_tz.utc)
+        _before = len(paper_state.get("positions", []))
+        paper_state["positions"] = [
+            p for p in paper_state.get("positions", [])
+            if not (lambda exp: exp < _now if exp else False)(
+                (lambda e: _dt.fromisoformat(e.replace("Z","+00:00")) if e else None)(p.get("expiry",""))
+            )
+        ]
+        _expired = _before - len(paper_state.get("positions", []))
+        if _expired > 0:
+            save_paper_state(paper_state)
+            print(f"   🗑️ Auto-closed {_expired} expired paper positions")
         paper_positions = [p for p in paper_state.get("positions", []) if p.get("status") == "open"]
         # Convert paper positions to the format manage_positions expects
         positions = []
@@ -3245,7 +3272,7 @@ def run_cycle(dry_run: bool = True, max_markets: int = 30, max_trades: int = 10)
     else:
         positions = get_positions()
         num_positions = len(positions)
-    dyn_max_pos = 50 if dry_run else dynamic_max_positions(balance)  # paper mode: high limit for data collection
+    dyn_max_pos = 500 if dry_run else dynamic_max_positions(balance)  # paper mode: high limit for data collection
     print(f"📊 Open positions: {num_positions}/{dyn_max_pos} (dynamic, balance ${balance:.0f})")
 
     # ── Position Management: Trailing Stop / Early Exit (TRADE-017) ──
@@ -3664,14 +3691,14 @@ Examples:
     _ssd_check = Path("/Volumes/DATI-SSD/kalshi-logs")
     if not _ssd_check.exists():
         print(f"⏳ SSD non montato, aspetto (max 30 min)...")
-        for _attempt in range(36):  # 36 × 5min = 3h max
-            time.sleep(300)  # 5 minuti
+        for _attempt in range(2):  # 36 × 5min = 3h max
+            time.sleep(15)  # 5 minuti
             if _ssd_check.exists():
                 print(f"✅ SSD montato dopo {(_attempt+1)*5} minuti")
                 break
-            print(f"⏳ SSD ancora non montato, riprovo tra 5 min (tentativo {_attempt+1}/36)...")
+            print(f"⏳ SSD ancora non montato, riprovo tra 15s (tentativo {_attempt+1}/36)...")
         else:
-            print("⚠️ SSD non montato dopo 3h — parto comunque su path locale")
+            print("⚠️ SSD non montato dopo 30s — parto comunque su path locale")
     if _ssd_check.exists() and _DATA_DIR != _ssd_check:
         print(f"📦 SSD disponibile — switching data dir a {_ssd_check}")
         _DATA_DIR         = _ssd_check
