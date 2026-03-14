@@ -278,8 +278,10 @@ MIN_VOLUME = 0            # No hard exclusion — thin markets exist in live too
 MIN_LIQUIDITY = 0         # No hard exclusion
 # Thin market fill simulation: volume < THIN_MARKET_VOLUME → only fill with probability
 # In live: BTC/ETH ladder markets fill ~15% of the time (rare counterpart at 50¢ default)
-THIN_MARKET_VOLUME = 500          # below this = "thin"
-THIN_MARKET_FILL_PROB = 0.15      # 15% fill probability for thin markets (live simulation)
+THIN_MARKET_VOLUME = 500          # below this = "thin" → AMM size-limited
+# Kalshi AMM reality: fills small orders always, but price moves with size
+# volume=0 → max 2 contracts at 50¢ (AMM impact ~1¢ per contract)
+# volume 1-499 → max 5 contracts (some organic flow supplements AMM)
 MAX_DAYS_TO_EXPIRY = 14  # Grok: ≤14d for sports (less uncertainty); crypto hourly unaffected
 MIN_DAYS_TO_EXPIRY = 0.005  # ~30 minutes
 MIN_PRICE_CENTS = 5
@@ -3577,17 +3579,19 @@ def run_cycle(dry_run: bool = True, max_markets: int = 30, max_trades: int = 10)
         order_result = place_order(market.ticker, side, decision.price_cents, decision.contracts, dry_run)
 
         if dry_run:
-            # ── Realistic fill simulation for thin markets ──
-            # Thin markets (volume < THIN_MARKET_VOLUME) have no active book at 50¢:
-            # in live trading only ~15% of orders get filled by an irrational counterpart.
-            import random as _rnd
+            # ── Realistic size cap for thin markets (live AMM simulation) ──
+            # Kalshi AMM fills small orders at 50¢ always. Constraint is SIZE not fill rate.
+            # volume=0: Kalshi AMM fills max ~2 contracts at 50¢ before price moves
+            # volume=100-500: AMM + some organic flow → max 5 contracts
+            # volume>500: liquid market → normal Kelly sizing
             _is_thin = market.volume < THIN_MARKET_VOLUME
-            if _is_thin and _rnd.random() > THIN_MARKET_FILL_PROB:
-                print(f"   🧪 DRY RUN: THIN MARKET no-fill (vol={market.volume} < {THIN_MARKET_VOLUME}, fill_prob={THIN_MARKET_FILL_PROB:.0%})")
-                trades_skipped += 1
-                log_decision(market, decision, "skipped_thin_nofill")
-                continue
-            print(f"   🧪 DRY RUN: {'THIN MARKET fill' if _is_thin else 'Simulated'} (vol={market.volume})")
+            if _is_thin:
+                _thin_max = 2 if market.volume == 0 else 5
+                if decision.contracts > _thin_max:
+                    decision.contracts = _thin_max
+                print(f"   🧪 DRY RUN: THIN fill (vol={market.volume}, capped at {_thin_max} contracts)")
+            else:
+                print(f"   🧪 DRY RUN: Simulated (vol={market.volume})")
             # Track in paper portfolio
             try:
                 paper_state = load_paper_state()
