@@ -167,15 +167,15 @@ VIRTUAL_BALANCE = 10000.0  # Virtual balance for paper mode — large bankroll, 
 
 # ── Trading parameters (Grok-tuned 2026-03-01) ──
 # BUY_NO: 66.7% WR +$4.53.  BUY_YES: 39.9% WR -$7.98 → DISABLED (needs 54%+ to break even)
-MIN_EDGE_BUY_NO  = 0.0
-MIN_EDGE_BUY_YES = 0.0
+MIN_EDGE_BUY_NO  = 0.03   # 3% min edge for BUY_NO (Grok confirmed)
+MIN_EDGE_BUY_YES = 0.20   # EFFECTIVELY DISABLED — 39.9% WR, needs 20% edge (never reached)
 CALIBRATION_FACTOR = 0.65  # legacy: kept for dynamic calibration baseline
 CALIBRATION_FACTOR_YES = 0.25  # YES: shrink even harder (Grok: 0.25-0.30)
 CALIBRATION_FACTOR_NO  = 0.62  # NO: let breathe a bit more (Grok: 0.60-0.65)
 
 # ── MULTIGAME special overrides (87.5% WR — golden goose) ──
-MULTIGAME_MIN_EDGE_BUY_NO  = 0.0
-MULTIGAME_MAX_NO_PRICE_CENTS = 80   # Can afford to buy stronger NO favorites in parlays
+MULTIGAME_MIN_EDGE_BUY_NO  = 0.010  # Slightly more aggressive: 1% (Grok rec: 0.8-1%)
+MULTIGAME_MAX_NO_PRICE_CENTS = 82   # Raised 80→82¢ (Grok rec: "can go to 82-85")
 
 
 def _compute_dynamic_calibration_factor(
@@ -2188,9 +2188,19 @@ def calculate_kelly(prob: float, price_cents: int, edge: float = 0.0) -> float:
     return max(0.0, min(kelly, MAX_POSITION_PCT))
 
 
+LEAGUE_BLACKLIST = {"NBA", "NHL"}  # Grok rec: ~50% WR = coin-flip after fees → always skip
+
 def make_trade_decision(market: MarketInfo, forecast: ForecastResult, critic: CriticResult,
                         balance: float) -> TradeDecision:
     """Compare probability vs market price and decide. Uses split thresholds (v3 data-driven)."""
+    # ── League blacklist: NBA/NHL are near-efficient (50-52% WR, fee-eroded) ──
+    ticker_up = market.ticker.upper()
+    for league in LEAGUE_BLACKLIST:
+        if league in ticker_up:
+            return TradeDecision(action="SKIP", edge=0.0, kelly_size=0, contracts=0,
+                                price_cents=0, reason=f"{league} blacklisted (coin-flip WR, Grok rec)",
+                                forecast=forecast, critic=critic)
+
     final_prob = 0.6 * forecast.probability + 0.4 * critic.adjusted_probability
 
     # Overconfidence decay: shrink toward 50% for BUY_YES on markets >72h out only
@@ -2302,6 +2312,11 @@ def make_trade_decision(market: MarketInfo, forecast: ForecastResult, critic: Cr
 
     # Kelly sizing (PROC-002 Task 5.2: apply vol regime scaling)
     kelly_frac = calculate_kelly(final_prob if action == "BUY_YES" else (1 - final_prob), side_price, edge)
+
+    # ── CRYPTO category Kelly boost ×1.5 (Grok rec: 94.7% WR confirms massive edge) ──
+    _is_crypto = any(x in ticker_up for x in ("BTC", "ETH", "KXBTC", "KXETH", "CRYPTO"))
+    if _is_crypto:
+        kelly_frac = min(kelly_frac * 1.5, 0.40)  # cap at 40% even for crypto
 
     # PROC-002 Task 4.2: Recovery mode — halve Kelly when drawdown > 10%
     if DRAWDOWN_PEAK_BALANCE > 0 and balance < DRAWDOWN_PEAK_BALANCE:
