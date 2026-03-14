@@ -93,7 +93,7 @@ def compute_metrics() -> dict:
         "no_win_rate":        m["no_win_rate"],
         "yes_trades":         m["yes_trades"],
         "no_trades":          m["no_trades"],
-        "roi_pct":            m["roi_pct"],
+        "roi_pct":            round((current_cents - starting_cents) / max(starting_cents, 1) * 100, 2),
         "net_pnl_usd":        round(m["net_pnl_cents"] / 100, 2),
         "gross_profit_usd":   round(m["gross_profit_cents"] / 100, 2),
         "gross_loss_usd":     round(m["gross_loss_cents"] / 100, 2),
@@ -104,6 +104,7 @@ def compute_metrics() -> dict:
         "avg_edge":           m["avg_edge"],
         "trader_running":     pid is not None,
         "trader_pid":         pid,
+        "open_positions_count": len(state.get("positions", [])),
         "last_updated":       datetime.now(timezone.utc).isoformat(),
         "watchdog":           load_watchdog_state(),
     }
@@ -652,7 +653,18 @@ body::after{
   </div>
 
   <!-- CHARTS ROW 1 -->
-  <div class="sec">Performance</div>
+  <div class="sec" style="display:flex;justify-content:space-between;align-items:center">
+    <span>Performance</span>
+    <div style="display:flex;gap:.5rem;align-items:center">
+      <span class="muted" style="font-size:.75rem">Periodo:</span>
+      <select x-model="timeRange" @change="refresh()" style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:.25rem .5rem;border-radius:4px;font-size:.8rem">
+        <option value="7d">Ultimi 7 giorni</option>
+        <option value="14d">Ultimi 14 giorni</option>
+        <option value="30d">Ultimi 30 giorni</option>
+        <option value="all">Tutto</option>
+      </select>
+    </div>
+  </div>
   <div class="cg2">
     <div class="card cc"><div class="ct">Bankroll ($)</div><div id="ch-bankroll"></div></div>
     <div class="card cc"><div class="ct">ROI Cumulativo (%)</div><div id="ch-roi"></div></div>
@@ -878,6 +890,7 @@ function dash(){
     edgeDist:{yes:[],no:[]},
     starting:false, resetting:false, resetMsg:'',
     paramHistory:[],
+    timeRange:'7d',
 
     // GOLDEN CONFIG for comparison
     golden:{MIN_EDGE_BUY_NO:'3%',MIN_EDGE_BUY_YES:'8%',KELLY_FRACTION:'0.25',
@@ -987,14 +1000,27 @@ function dash(){
       this._ch[id].render();
     },
 
+    /* Filter data by time range */
+    filterByTime(data, dateField='t'){
+      if(this.timeRange==='all'||!data||!data.length) return data;
+      const now=Date.now();
+      const ranges={'7d':7*24*3600*1000,'14d':14*24*3600*1000,'30d':30*24*3600*1000};
+      const cutoff=now-ranges[this.timeRange]||ranges['7d'];
+      return data.filter(d=>{
+        const ts=new Date(d[dateField]||d.ts||'').replace(' ','T').getTime();
+        return ts>=cutoff;
+      });
+    },
+
     charts(){
       const m=this.m,roi=this.roi,tr=this.trades,b=this.base();
       const cycles=this.cycles,daily=this.daily,hourly=this.hourly,ch=this.cycleHourly;
+      const f=(data,field)=>this.filterByTime(data,field);
 
       /* Bankroll — fallback to cycle data when no settled trades yet */
-      let bk=m.bankroll_series&&m.bankroll_series.length?m.bankroll_series:null;
-      if(!bk&&cycles&&cycles.length) bk=cycles.map(c=>({t:c.t,v:c.b}));
-      if(!bk&&roi&&roi.length) bk=roi.map(r=>({t:r.t,v:+(m.starting_balance_usd+r.v/100*m.starting_balance_usd).toFixed(2)}));
+      let bk=m.bankroll_series&&m.bankroll_series.length?f(m.bankroll_series):null;
+      if(!bk&&cycles&&cycles.length) bk=f(cycles.map(c=>({t:c.t,v:c.b})));
+      if(!bk&&roi&&roi.length) bk=f(roi.map(r=>({t:r.t,v:+(m.starting_balance_usd+r.v/100*m.starting_balance_usd).toFixed(2)})));
       if(bk&&bk.length){
         const bkLabel=m.bankroll_series&&m.bankroll_series.length?'Bankroll ($)':'Balance per Ciclo ($)';
         this.mk('ch-bankroll',{...b,
@@ -1013,15 +1039,16 @@ function dash(){
       }
 
       /* ROI */
-      const lv=roi.length?roi[roi.length-1].v:0;
+      const fRoi=f(roi);
+      const lv=fRoi&&fRoi.length?fRoi[fRoi.length-1].v:0;
       const rc=lv>=0?'#10b981':'#ef4444';
       this.mk('ch-roi',{...b,
         chart:{...b.chart,type:'area',height:210},
-        series:[{name:'ROI (%)',data:roi.map(p=>({x:p.t,y:p.v}))}],
+        series:[{name:'ROI (%)',data:fRoi.map(p=>({x:p.t,y:p.v}))}],
         stroke:{curve:'smooth',width:2},
         fill:{type:'gradient',gradient:{shadeIntensity:1,opacityFrom:.38,opacityTo:.02,stops:[0,100]}},
         colors:[rc],
-        markers:{size:roi.length<25?4:0,colors:[rc],strokeWidth:0},
+        markers:{size:fRoi.length<25?4:0,colors:[rc],strokeWidth:0},
         yaxis:{...b.yaxis,labels:{...b.yaxis.labels,formatter:v=>v.toFixed(1)+'%'}},
         xaxis:{...b.xaxis,type:'category',labels:{...b.xaxis.labels,rotate:-30,maxHeight:55,
                formatter:v=>v?v.slice(5,16):''}},
@@ -1044,7 +1071,8 @@ function dash(){
       }
 
       /* Edge Distribution */
-      const edges=tr.filter(t=>t.edge!=null).map(t=>t.edge);
+      const fTr=this.timeRange==='all'?tr:f(tr,'ts');
+      const edges=fTr.filter(t=>t.edge!=null).map(t=>t.edge);
       if(edges.length){
         const bkts=Array(10).fill(0);
         edges.forEach(e=>{const i=Math.min(9,Math.floor(e/2));bkts[i]++;});
@@ -1058,7 +1086,7 @@ function dash(){
 
       /* Trades per Day */
       const bd={};
-      tr.forEach(t=>{const d=(t.ts||'').slice(0,10);if(d)bd[d]=(bd[d]||0)+1;});
+      fTr.forEach(t=>{const d=(t.ts||'').slice(0,10);if(d)bd[d]=(bd[d]||0)+1;});
       const days=Object.keys(bd).sort().slice(-14);
       if(days.length){
         this.mk('ch-daily',{...b,
@@ -1072,11 +1100,12 @@ function dash(){
       /* ── TIME SERIES CHARTS ─────────────────────────────── */
 
       /* Balance from cycles (per-cycle granularity) */
-      if(cycles&&cycles.length){
-        const N=cycles.length;
+      const fCycles=f(cycles);
+      if(fCycles&&fCycles.length){
+        const N=fCycles.length;
         // x-axis: abbreviated time label based on span
-        const first=new Date(cycles[0].t.replace(' ','T')+'Z');
-        const last=new Date(cycles[N-1].t.replace(' ','T')+'Z');
+        const first=new Date(fCycles[0].t.replace(' ','T')+'Z');
+        const last=new Date(fCycles[N-1].t.replace(' ','T')+'Z');
         const spanH=(last-first)/3600000;
         const fmt=t=>{
           const d=new Date(t.replace(' ','T')+'Z');
@@ -1084,9 +1113,9 @@ function dash(){
           if(spanH<=48) return d.toLocaleString('it-IT',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'UTC'});
           return d.toLocaleDateString('it-IT',{month:'2-digit',day:'2-digit',timeZone:'UTC'});
         };
-        const cycleLabels=cycles.map(c=>fmt(c.t));
-        const balData=cycles.map(c=>({x:fmt(c.t),y:c.b}));
-        const tpData=cycles.map(c=>c.tp);
+        const cycleLabels=fCycles.map(c=>fmt(c.t));
+        const balData=fCycles.map(c=>({x:fmt(c.t),y:c.b}));
+        const tpData=fCycles.map(c=>c.tp);
         this.mk('ch-cycle-balance',{...b,
           chart:{...b.chart,type:'area',height:240},
           series:[{name:'Bankroll ($)',data:balData}],
