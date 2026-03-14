@@ -274,10 +274,12 @@ EARLY_EXIT_NEAR_EXPIRY_HOURS = 2  # Force exit if <2h to expiry and in profit
 HARD_STOP_LOSS_PCT = -0.30   # Hard stop: exit if position is -30% or worse
 
 # ── Market scanning filters ──
-# Realism filters: only trade markets with real liquidity (live simulation)
-# volume=0 or OI=0 at 50¢ = thin market with default price → not tradeable in live
-MIN_VOLUME = 500          # min contracts traded (was 0 — excluded all thin markets)
-MIN_LIQUIDITY = 200       # min(OI, volume) — ensures active book
+MIN_VOLUME = 0            # No hard exclusion — thin markets exist in live too
+MIN_LIQUIDITY = 0         # No hard exclusion
+# Thin market fill simulation: volume < THIN_MARKET_VOLUME → only fill with probability
+# In live: BTC/ETH ladder markets fill ~15% of the time (rare counterpart at 50¢ default)
+THIN_MARKET_VOLUME = 500          # below this = "thin"
+THIN_MARKET_FILL_PROB = 0.15      # 15% fill probability for thin markets (live simulation)
 MAX_DAYS_TO_EXPIRY = 14  # Grok: ≤14d for sports (less uncertainty); crypto hourly unaffected
 MIN_DAYS_TO_EXPIRY = 0.005  # ~30 minutes
 MIN_PRICE_CENTS = 5
@@ -3575,7 +3577,17 @@ def run_cycle(dry_run: bool = True, max_markets: int = 30, max_trades: int = 10)
         order_result = place_order(market.ticker, side, decision.price_cents, decision.contracts, dry_run)
 
         if dry_run:
-            print(f"   🧪 DRY RUN: Simulated")
+            # ── Realistic fill simulation for thin markets ──
+            # Thin markets (volume < THIN_MARKET_VOLUME) have no active book at 50¢:
+            # in live trading only ~15% of orders get filled by an irrational counterpart.
+            import random as _rnd
+            _is_thin = market.volume < THIN_MARKET_VOLUME
+            if _is_thin and _rnd.random() > THIN_MARKET_FILL_PROB:
+                print(f"   🧪 DRY RUN: THIN MARKET no-fill (vol={market.volume} < {THIN_MARKET_VOLUME}, fill_prob={THIN_MARKET_FILL_PROB:.0%})")
+                trades_skipped += 1
+                log_decision(market, decision, "skipped_thin_nofill")
+                continue
+            print(f"   🧪 DRY RUN: {'THIN MARKET fill' if _is_thin else 'Simulated'} (vol={market.volume})")
             # Track in paper portfolio
             try:
                 paper_state = load_paper_state()
