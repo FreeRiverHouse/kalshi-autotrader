@@ -274,8 +274,10 @@ EARLY_EXIT_NEAR_EXPIRY_HOURS = 2  # Force exit if <2h to expiry and in profit
 HARD_STOP_LOSS_PCT = -0.30   # Hard stop: exit if position is -30% or worse
 
 # ── Market scanning filters ──
-MIN_VOLUME = 0
-MIN_LIQUIDITY = 0
+# Realism filters: only trade markets with real liquidity (live simulation)
+# volume=0 or OI=0 at 50¢ = thin market with default price → not tradeable in live
+MIN_VOLUME = 500          # min contracts traded (was 0 — excluded all thin markets)
+MIN_LIQUIDITY = 200       # min(OI, volume) — ensures active book
 MAX_DAYS_TO_EXPIRY = 14  # Grok: ≤14d for sports (less uncertainty); crypto hourly unaffected
 MIN_DAYS_TO_EXPIRY = 0.005  # ~30 minutes
 MIN_PRICE_CENTS = 5
