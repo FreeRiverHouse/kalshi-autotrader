@@ -3715,20 +3715,12 @@ Examples:
 
     args = parser.parse_args()
 
-    # ── Wait for SSD at boot (SSD is always attached but takes time to mount) ──
+    # ── Use SSD if available, else fall back to local path immediately (no wait) ──
     global _DATA_DIR, TRADE_LOG_FILE, V3_TRADE_LOG, CYCLE_LOG_FILE, SKIP_LOG_FILE, \
            DECISION_LOG_FILE, PAPER_STATE_FILE, AUTOTRADER_LOG_FILE
     _ssd_check = Path("/Volumes/DATI-SSD/kalshi-logs")
     if not _ssd_check.exists():
-        print(f"⏳ SSD non montato, aspetto (max 30 min)...")
-        for _attempt in range(2):  # 36 × 5min = 3h max
-            time.sleep(15)  # 5 minuti
-            if _ssd_check.exists():
-                print(f"✅ SSD montato dopo {(_attempt+1)*5} minuti")
-                break
-            print(f"⏳ SSD ancora non montato, riprovo tra 15s (tentativo {_attempt+1}/36)...")
-        else:
-            print("⚠️ SSD non montato dopo 30s — parto comunque su path locale")
+        print(f"ℹ️  SSD non montato — parto su path locale ({_DATA_DIR})")
     if _ssd_check.exists() and _DATA_DIR != _ssd_check:
         print(f"📦 SSD disponibile — switching data dir a {_ssd_check}")
         _DATA_DIR         = _ssd_check
