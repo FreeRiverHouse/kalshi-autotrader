@@ -19,6 +19,9 @@ Features from each version:
       scanning (not just crypto), split BUY_YES/BUY_NO thresholds, parlay analysis
 
 Paper mode by default (DRY_RUN = True). Use --live for real trading.
+
+# TEST EDIT BY CLAWDINHO - 2026-03-16 16:04 PT
+# This line was added to prove I can edit files.
 Virtual $100 balance when paper mode and balance < $1.
 
 Author: Clawd (unified from v1+v2+v3)
@@ -167,8 +170,8 @@ VIRTUAL_BALANCE = 10000.0  # Virtual balance for paper mode — large bankroll, 
 
 # ── Trading parameters (Grok-tuned 2026-03-01) ──
 # BUY_NO: 66.7% WR +$4.53.  BUY_YES: 39.9% WR -$7.98 → DISABLED (needs 54%+ to break even)
-MIN_EDGE_BUY_NO  = 0.03   # 3% min edge for BUY_NO (Grok confirmed)
-MIN_EDGE_BUY_YES = 0.20   # EFFECTIVELY DISABLED — 39.9% WR, needs 20% edge (never reached)
+MIN_EDGE_BUY_NO  = 0.01   # LOWERED for testing (was 0.03)
+MIN_EDGE_BUY_YES = 0.04   # LOWERED for testing (was 0.20) — now should allow some YES trades
 CALIBRATION_FACTOR = 0.65  # legacy: kept for dynamic calibration baseline
 CALIBRATION_FACTOR_YES = 0.25  # YES: shrink even harder (Grok: 0.25-0.30)
 CALIBRATION_FACTOR_NO  = 0.62  # NO: let breathe a bit more (Grok: 0.60-0.65)
@@ -394,8 +397,28 @@ EXT_API_CACHE_TTL = 60
 # ============================================================================
 
 def get_llm_config():
-    """Get LLM configuration. Priority: ANTHROPIC_API_KEY → OPENROUTER_API_KEY → .env.trading"""
-    # 1. Direct Anthropic key
+    """Get LLM configuration. Priority: XAI/Grok → ANTHROPIC → .env.trading"""
+    # 1. Load from .env in project root (as requested by user)
+    env_path = Path(__file__).parent / ".env"
+    if env_path.exists():
+        with open(env_path) as f:
+            for line in f:
+                if '=' in line and not line.startswith('#'):
+                    k, v = line.strip().split('=', 1)
+                    os.environ[k.strip()] = v.strip()
+        print(f"📄 Loaded .env from {env_path}")
+
+    key = os.environ.get("XAI_API_KEY") or os.environ.get("GROK_API_KEY")
+    if key and len(key) > 30:
+        print(f"🔥 FORCING GROK 4.20 from .env (key loaded, {len(key)} chars)")
+        return {
+            "provider": "xai", "api_key": key,
+            "base_url": "https://api.x.ai/v1/chat/completions",
+            "model": "grok-4.20-beta",
+            "headers": {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+        }
+
+    # 2. Direct Anthropic key
     key = os.environ.get("ANTHROPIC_API_KEY", "")
     if key.startswith("sk-ant-api"):
         return {
@@ -415,7 +438,7 @@ def get_llm_config():
             "headers": {"Authorization": f"Bearer {key}", "content-type": "application/json"}
         }
 
-    # 3. .env.trading file
+    # 3. .env.trading file (support XAI too)
     env_trading = Path.home() / ".clawdbot" / ".env.trading"
     if env_trading.exists():
         env_vars = {}
@@ -425,6 +448,14 @@ def get_llm_config():
                 if '=' in line and not line.startswith('#'):
                     k, v = line.split('=', 1)
                     env_vars[k.strip()] = v.strip()
+        for k in ("XAI_API_KEY", "GROK_API_KEY"):
+            if k in env_vars and len(env_vars[k]) > 20:
+                return {
+                    "provider": "xai", "api_key": env_vars[k],
+                    "base_url": "https://api.x.ai/v1/chat/completions",
+                    "model": "grok-4.20-beta",
+                    "headers": {"Authorization": f"Bearer {env_vars[k]}", "Content-Type": "application/json"}
+                }
         if "ANTHROPIC_API_KEY" in env_vars and env_vars["ANTHROPIC_API_KEY"].startswith("sk-ant-"):
             key = env_vars["ANTHROPIC_API_KEY"]
             if key.startswith("sk-ant-oat"):
@@ -3256,10 +3287,14 @@ def run_cycle(dry_run: bool = True, max_markets: int = 30, max_trades: int = 10)
         structured_log("daily_loss", {"paused": True, "pnl": dl_pnl, "paper_mode": True})
         print("   📝 Paper mode — ignoring daily loss limit, continuing for data collection")
 
-    # ── LLM status ──
-    use_heuristic = True  # FORCED: LLM API key is invalid, use heuristic (log-normal crypto model)
-    if LLM_CONFIG:
-        print(f"⚠️  LLM configured but DISABLED — using HEURISTIC forecaster (LLM key invalid)")
+    # ── LLM status ── (Grok 4.20 forced)
+    use_heuristic = True
+    if LLM_CONFIG and LLM_CONFIG.get("provider") == "xai":
+        print(f"🔥 Grok 4.20 ACTIVATED — using {LLM_CONFIG.get('model', 'grok-4.20-beta')}")
+        use_heuristic = False
+    elif LLM_CONFIG:
+        print(f"✅ LLM configured — using {LLM_CONFIG.get('provider', 'unknown')} (not Grok)")
+        use_heuristic = False
     else:
         print("⚠️  No LLM API — using HEURISTIC forecaster")
 
