@@ -277,8 +277,11 @@ EARLY_EXIT_NEAR_EXPIRY_HOURS = 2  # Force exit if <2h to expiry and in profit
 HARD_STOP_LOSS_PCT = -0.30   # Hard stop: exit if position is -30% or worse
 
 # ── Market scanning filters (2026-03-16 SELECTIVE) ──
-MIN_VOLUME = 0            # AMM markets have real liquidity even at vol=0 — filter ghost markets below
-MIN_LIQUIDITY = 0         # OI can be 0 on fresh hourly crypto contracts (AMM provides fills)
+MIN_VOLUME = 0            # Volume filter applied per-market type (see filter_markets)
+MIN_LIQUIDITY = 0         # OI filter (see filter_markets for smart logic)
+# Realistic paper mode: simulate live constraints
+PAPER_SPREAD_CENTS = 3    # AMM spread on vol=0 markets (~3¢ each side = 6¢ round trip)
+PAPER_MIN_VOLUME_NON_CRYPTO = 50  # Non-crypto markets MUST have real volume (in live mode too)
 THIN_MARKET_VOLUME = 500          # below this = "thin" → AMM size-limited
 # Kalshi AMM reality: fills small orders always, but price moves with size
 # volume=0 → max 2 contracts at 50¢ (AMM impact ~1¢ per contract)
@@ -2496,6 +2499,14 @@ def make_trade_decision(market: MarketInfo, forecast: ForecastResult, critic: Cr
     else:
         action, side_price, edge = "BUY_NO", market.no_price, abs(edge_yes)
 
+    # REALISTIC PAPER: simulate AMM spread on thin markets
+    # In live mode, you pay the ask (not mid). Vol=0 markets have ~3-5¢ spread.
+    # This reduces edge by the spread cost, making paper results match live expectations.
+    if DRY_RUN and market.volume < THIN_MARKET_VOLUME:
+        spread = PAPER_SPREAD_CENTS if market.volume == 0 else max(1, PAPER_SPREAD_CENTS // 2)
+        side_price += spread  # Pay ask, not mid → higher cost, lower profit
+        edge -= spread / 100.0  # Spread eats into edge
+
     # ── MULTIGAME override: lower edge bar + higher price cap (87.5% WR — golden goose) ──
     is_multigame = any(x in market.ticker.upper() for x in ("MULTIGAME", "COMBO"))
     effective_max_no_price = MULTIGAME_MAX_NO_PRICE_CENTS if is_multigame else MAX_NO_PRICE_CENTS
@@ -2662,11 +2673,15 @@ def filter_markets(markets: list) -> list:
             continue
         if m.volume < MIN_VOLUME:
             continue
-        # Ghost market filter: vol=0 + OI=0 + 50¢ price + far from expiry = no price discovery
-        # Near-term AMM markets (crypto hourly) with <2h to settle ARE tradeable (AMM fills, 97.7% WR)
-        if m.volume == 0 and m.open_interest == 0 and m.yes_price == 50:
+        # LIVE-REALISTIC: non-crypto markets MUST have real volume
+        # In live mode you'd NEVER trade a politics/sports market with 0 volume
+        is_crypto = any(x in m.ticker.upper() for x in ("KXBTC", "KXETH", "KXSOL"))
+        if not is_crypto and m.volume < PAPER_MIN_VOLUME_NON_CRYPTO:
+            continue
+        # Ghost market filter for crypto: vol=0 + OI=0 + 50¢ + far from expiry = no signal
+        if is_crypto and m.volume == 0 and m.open_interest == 0 and m.yes_price == 50:
             dte_h = m.days_to_expiry * 24
-            if dte_h > 2:  # Only filter if >2h — near-term crypto markets stay
+            if dte_h > 2:
                 continue
         dte = m.days_to_expiry
         if dte > MAX_DAYS_TO_EXPIRY or dte < MIN_DAYS_TO_EXPIRY:
