@@ -76,19 +76,41 @@ def compute_metrics() -> dict:
     starting_cents = state.get("starting_balance_cents", 10000)
     current_cents  = state.get("current_balance_cents", starting_cents)
 
-    # Build bankroll series from SQLite cumulative PnL
+    # Build bankroll series from SQLite cumulative PnL, shifted by reset_timestamp
     bk_raw  = m.get("bankroll_series_raw", [])
     bk_base = starting_cents / 100
-    bankroll_series = [
-        {"t": t[:19].replace("T", " ") if t else "", "v": round(bk_base + cum_pnl / 100, 2)}
-        for t, cum_pnl in bk_raw
-    ]
+    
+    reset_ts = state.get("reset_timestamp")
+    offset_pnl = 0
+    if reset_ts:
+        for t, cum_pnl in bk_raw:
+            if t and t <= reset_ts:
+                offset_pnl = cum_pnl
+
+    bankroll_series = []
+    for t, cum_pnl in bk_raw:
+        if reset_ts and t and t < reset_ts:
+            continue
+        bankroll_series.append({
+            "t": t[:19].replace("T", " ") if t else "",
+            "v": round(bk_base + (cum_pnl - offset_pnl) / 100, 2)
+        })
+
+    # If paper mode was reset, prefer the strictly scoped stats
+    if reset_ts:
+        st = state.get("stats", {})
+        m["total_trades"] = st.get("total_trades", m["total_trades"])
+        m["won"]          = st.get("wins", m["won"])
+        m["lost"]         = st.get("losses", m["lost"])
+        m["settled"]      = m["won"] + m["lost"]
+        m["win_rate"]     = st.get("win_rate", m["win_rate"])
+        m["net_pnl_cents"]= st.get("pnl_cents", m["net_pnl_cents"])
 
     pid = trader_pid()
     return {
         "total_trades":       m["total_trades"],
         "settled":            m["settled"],
-        "pending":            m["pending"],
+        "pending":            state.get("stats", {}).get("pending", m["pending"]),
         "won":                m["won"],
         "lost":               m["lost"],
         "win_rate":           m["win_rate"],
@@ -212,11 +234,25 @@ def api_all():
     ps  = load_paper_state()
     wd  = load_watchdog_state()
     pid = trader_pid()
+    
+    reset_ts = ps.get("reset_timestamp")
+    
+    c_series = _db.get_cycle_series(1000)
+    r_series = _db.get_roi_series()
+    t_recent = get_recent_trades(200)
+
+    if reset_ts:
+        # Convert reset_ts to "YYYY-MM-DD HH:MM:SS" strictly for string comparison against 't'/'ts'
+        rts = reset_ts[:19].replace("T", " ")
+        c_series = [c for c in c_series if c.get("t", "") >= rts]
+        r_series = [r for r in r_series if r.get("t", "") >= rts]
+        t_recent = [t for t in t_recent if t.get("ts", "") >= rts]
+
     return jsonify({
         "metrics":         m,
-        "trades":          get_recent_trades(100),
-        "roi_series":      _db.get_roi_series(),
-        "cycle_series":    _db.get_cycle_series(500),
+        "trades":          t_recent,
+        "roi_series":      r_series,
+        "cycle_series":    c_series,
         "daily_stats":     _db.get_daily_stats(),
         "calibration":     _db.get_calibration_data(),
         "streaks":         _db.get_streak_analysis(),
