@@ -1690,8 +1690,7 @@ KEY_FACTORS: [factor1], [factor2], [factor3]"""
         elif "ETH" in ticker_upper:
             current = crypto_prices.get("eth", 0)
         if current > 0:
-            import re as _re
-            nums = _re.findall(r'[\d,]+\.?\d*', market.title.replace(',', ''))
+            nums = re.findall(r'[\d,]+\.?\d*', market.title.replace(',', ''))
             targets = [float(n.replace(',', '')) for n in nums if float(n.replace(',', '')) > 100]
             if targets:
                 target = max(targets)
@@ -1819,11 +1818,27 @@ MAJOR_FLAWS: [critical_flaw1] (or NONE)
 SHOULD_TRADE: [yes/no]"""
 
     edge = forecast.probability - market.market_prob
+    # Compute time remaining for Critic context
+    try:
+        _exp_dt = datetime.fromisoformat(market.expiry.replace('Z', '+00:00'))
+        _time_left = _exp_dt - datetime.now(timezone.utc)
+        if _time_left.total_seconds() < 3600:
+            _time_desc = f"{int(_time_left.total_seconds() / 60)} minutes"
+        elif _time_left.days > 0:
+            _time_desc = f"{_time_left.days}d {_time_left.seconds // 3600}h"
+        else:
+            _time_desc = f"{_time_left.seconds // 3600}h {(_time_left.seconds % 3600) // 60}m"
+        _expiry_str = _exp_dt.strftime("%Y-%m-%d %H:%M UTC")
+    except Exception:
+        _time_desc = "unknown"
+        _expiry_str = market.expiry or "unknown"
+
     user_prompt = f"""Review this forecast:
 
 MARKET: {market.title}
 PRICE: {market.yes_price}¢ (implies {market.market_prob:.0%})
 VOLUME: {market.volume:,}
+EXPIRY: {_expiry_str} ({_time_desc} remaining)
 
 FORECAST: {forecast.probability:.1%} (confidence: {forecast.confidence})
 REASONING: {forecast.reasoning[:1500]}
