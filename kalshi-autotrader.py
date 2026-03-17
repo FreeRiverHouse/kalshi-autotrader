@@ -371,6 +371,7 @@ LEGACY_TRADE_LOG = PROJECT_ROOT / "kalshi-trades.jsonl"
 # ── Alert files (v2 compat) ──
 CIRCUIT_BREAKER_STATE_FILE = Path(__file__).parent / "kalshi-circuit-breaker.json"
 DAILY_LOSS_PAUSE_FILE = Path(__file__).parent / "kalshi-daily-pause.json"
+ADAPTIVE_STATE_FILE = _DATA_DIR / "adaptive-params.json"  # Persisted adaptive params (survive restart)
 
 # ── Alert files (GROK-TRADE-002) ──
 DRAWDOWN_ALERT_FILE = Path(__file__).parent / "kalshi-drawdown.alert"
@@ -3586,14 +3587,37 @@ def run_cycle(dry_run: bool = True, max_markets: int = 30, max_trades: int = 10)
     # ── Adaptive parameter tuning ─────────────────────────────────────────────
     # Runs every ADAPT_EVERY_N settled trades. Adjusts MIN_EDGE, CAL_FACTOR, KELLY
     # based on rolling performance from SQLite. Safe: clamped to sane ranges.
+    # On first cycle after restart: load persisted adaptive values from disk.
     try:
         from adaptive import compute_adaptive_params, ADAPT_EVERY_N
         global MIN_EDGE_BUY_YES, MIN_EDGE_BUY_NO
         global CALIBRATION_FACTOR_YES, CALIBRATION_FACTOR_NO
         global KELLY_FRACTION
+        # Load persisted adaptive state on first run
+        if not getattr(run_cycle, '_adaptive_loaded', False):
+            run_cycle._adaptive_loaded = True
+            if ADAPTIVE_STATE_FILE.exists():
+                try:
+                    _saved = json.loads(ADAPTIVE_STATE_FILE.read_text())
+                    MIN_EDGE_BUY_YES       = _saved.get("MIN_EDGE_BUY_YES", MIN_EDGE_BUY_YES)
+                    MIN_EDGE_BUY_NO        = _saved.get("MIN_EDGE_BUY_NO", MIN_EDGE_BUY_NO)
+                    CALIBRATION_FACTOR_YES = _saved.get("CALIBRATION_FACTOR_YES", CALIBRATION_FACTOR_YES)
+                    CALIBRATION_FACTOR_NO  = _saved.get("CALIBRATION_FACTOR_NO", CALIBRATION_FACTOR_NO)
+                    KELLY_FRACTION         = _saved.get("KELLY_FRACTION", KELLY_FRACTION)
+                    run_cycle._last_adapted_at = _saved.get("_last_settled", 0)
+                    print(f"📂 Loaded adaptive params from disk: MIN_NO={MIN_EDGE_BUY_NO:.1%} "
+                          f"CAL_NO={CALIBRATION_FACTOR_NO:.2f} KELLY={KELLY_FRACTION:.2f}")
+                except Exception as _le:
+                    print(f"⚠️  Could not load adaptive state: {_le}")
         metrics_snap = _db.get_metrics()
         total_settled = metrics_snap.get("settled", 0)
-        if total_settled >= ADAPT_EVERY_N and total_settled % ADAPT_EVERY_N == 0:
+        # Only trigger when we cross a new ADAPT_EVERY_N boundary (not every cycle at same settled count)
+        _last_adapted = getattr(run_cycle, '_last_adapted_at', 0)
+        _should_adapt = (total_settled >= ADAPT_EVERY_N
+                         and total_settled % ADAPT_EVERY_N == 0
+                         and total_settled != _last_adapted)
+        if _should_adapt:
+            run_cycle._last_adapted_at = total_settled
             adj = compute_adaptive_params({
                 "MIN_EDGE_BUY_YES":       MIN_EDGE_BUY_YES,
                 "MIN_EDGE_BUY_NO":        MIN_EDGE_BUY_NO,
@@ -3622,6 +3646,19 @@ def run_cycle(dry_run: bool = True, max_markets: int = 30, max_trades: int = 10)
                       f"KELLY={KELLY_FRACTION:.2f} | "
                       f"WR YES={meta.get('yes_wr')}% NO={meta.get('no_wr')}% "
                       f"PF={meta.get('profit_factor'):.2f}")
+                # Persist adaptive params to disk (survive restart)
+                try:
+                    ADAPTIVE_STATE_FILE.write_text(json.dumps({
+                        "MIN_EDGE_BUY_YES": MIN_EDGE_BUY_YES,
+                        "MIN_EDGE_BUY_NO": MIN_EDGE_BUY_NO,
+                        "CALIBRATION_FACTOR_YES": CALIBRATION_FACTOR_YES,
+                        "CALIBRATION_FACTOR_NO": CALIBRATION_FACTOR_NO,
+                        "KELLY_FRACTION": KELLY_FRACTION,
+                        "_last_settled": total_settled,
+                        "_updated_at": datetime.now(timezone.utc).isoformat(),
+                    }, indent=2))
+                except Exception:
+                    pass
     except Exception as _e:
         print(f"⚠️  Adaptive tuning error (non-fatal): {_e}")
 
