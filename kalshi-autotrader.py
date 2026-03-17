@@ -291,7 +291,7 @@ MIN_VOLUME = 0            # Volume filter applied per-market type (see filter_ma
 MIN_LIQUIDITY = 0         # OI filter (see filter_markets for smart logic)
 # Realistic paper mode: simulate live constraints
 PAPER_SPREAD_CENTS = 3    # AMM spread on vol=0 markets (~3¢ each side = 6¢ round trip)
-PAPER_MIN_VOLUME_NON_CRYPTO = 50  # Non-crypto markets MUST have real volume (in live mode too)
+PAPER_MIN_VOLUME_NON_CRYPTO = 1   # Just need 1+ trade for a real price signal (vol=0 = AMM default, no signal)
 THIN_MARKET_VOLUME = 500          # below this = "thin" → AMM size-limited
 # Kalshi AMM reality: fills small orders always, but price moves with size
 # volume=0 → max 2 contracts at 50¢ (AMM impact ~1¢ per contract)
@@ -2718,31 +2718,60 @@ def parse_market(raw: dict) -> Optional[MarketInfo]:
 
 def filter_markets(markets: list) -> list:
     filtered = []
+    _filter_stats = {"total": 0, "no_ticker": 0, "status": 0, "result": 0, "min_vol": 0,
+                     "non_crypto_vol": 0, "ghost_crypto": 0, "dte": 0, "price": 0,
+                     "crypto_pass": 0, "noncrypto_pass": 0}
     for m in markets:
+        _filter_stats["total"] += 1
         if not m.ticker or not m.title:
+            _filter_stats["no_ticker"] += 1
             continue
         if m.status not in ("open", "active", ""):
+            _filter_stats["status"] += 1
             continue
         if m.result:
+            _filter_stats["result"] += 1
             continue
         if m.volume < MIN_VOLUME:
+            _filter_stats["min_vol"] += 1
             continue
         # LIVE-REALISTIC: non-crypto markets MUST have real volume
         # In live mode you'd NEVER trade a politics/sports market with 0 volume
         is_crypto = any(x in m.ticker.upper() for x in ("KXBTC", "KXETH", "KXSOL"))
         if not is_crypto and m.volume < PAPER_MIN_VOLUME_NON_CRYPTO:
+            _filter_stats["non_crypto_vol"] += 1
+            if "_nc_samples" not in _filter_stats:
+                _filter_stats["_nc_samples"] = []
+            if len(_filter_stats["_nc_samples"]) < 50:
+                _filter_stats["_nc_samples"].append((m.ticker, m.volume))
             continue
         # Ghost market filter for crypto: vol=0 + OI=0 + 50¢ + far from expiry = no signal
         if is_crypto and m.volume == 0 and m.open_interest == 0 and m.yes_price == 50:
             dte_h = m.days_to_expiry * 24
             if dte_h > 2:
+                _filter_stats["ghost_crypto"] += 1
                 continue
         dte = m.days_to_expiry
         if dte > MAX_DAYS_TO_EXPIRY or dte < MIN_DAYS_TO_EXPIRY:
+            _filter_stats["dte"] += 1
             continue
         if m.yes_price < MIN_PRICE_CENTS or m.yes_price > MAX_PRICE_CENTS:
+            _filter_stats["price"] += 1
             continue
+        if is_crypto:
+            _filter_stats["crypto_pass"] += 1
+        else:
+            _filter_stats["noncrypto_pass"] += 1
         filtered.append(m)
+    # Log filter breakdown for debugging
+    s = _filter_stats
+    print(f"   Filter breakdown: {s['total']} total → {s['non_crypto_vol']} killed by vol<{PAPER_MIN_VOLUME_NON_CRYPTO} (non-crypto), "
+          f"{s['ghost_crypto']} ghost crypto, {s['dte']} DTE, {s['price']} price, {s['result']} settled")
+    print(f"   Survivors: {s['crypto_pass']} crypto + {s['noncrypto_pass']} non-crypto = {len(filtered)}")
+    # One-time: show top non-crypto by volume that were filtered
+    if s['noncrypto_pass'] == 0 and _filter_stats.get("_nc_samples"):
+        samples = sorted(_filter_stats["_nc_samples"], key=lambda x: x[1], reverse=True)[:5]
+        print(f"   Top non-crypto by vol (filtered): {', '.join(f'{t[:25]}(v={v})' for t,v in samples)}")
     return filtered
 
 
