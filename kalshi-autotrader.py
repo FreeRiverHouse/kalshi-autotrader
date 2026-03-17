@@ -1017,6 +1017,35 @@ def sell_position(ticker: str, side: str, price_cents: int, count: int, dry_run:
 # Track peak unrealized profit per position (in-memory, resets on restart)
 _position_peaks: dict[str, float] = {}  # ticker → peak unrealized profit ratio
 
+# Cached consecutive loss streak (refreshed once per cycle, not per market)
+_cached_loss_streak: int = 0
+_cached_loss_streak_ts: float = 0.0
+
+def _get_cached_loss_streak() -> int:
+    """Return consecutive loss count, cached for 60s to avoid reading JSONL per-market."""
+    global _cached_loss_streak, _cached_loss_streak_ts
+    now = time.time()
+    if now - _cached_loss_streak_ts < 60:
+        return _cached_loss_streak
+    _cached_loss_streak_ts = now
+    losses = 0
+    try:
+        if TRADE_LOG_FILE.exists():
+            with open(TRADE_LOG_FILE) as f:
+                for line in reversed(f.readlines()[-20:]):
+                    try:
+                        status = json.loads(line.strip()).get("result_status", "pending")
+                        if status == "won":
+                            break
+                        elif status == "lost":
+                            losses += 1
+                    except Exception:
+                        continue
+    except Exception:
+        pass
+    _cached_loss_streak = losses
+    return losses
+
 def manage_positions(positions: list, dry_run: bool = True) -> int:
     """
     Monitor open positions and exit when profitable.
@@ -1247,18 +1276,28 @@ def get_crypto_prices() -> Optional[dict]:
         return None
 
 
-def get_realtime_crypto_price(asset: str = "btc") -> float:
-    """Get FRESH crypto price from Binance (no cache). For latency arb detection.
+_realtime_price_cache: dict = {}  # {asset: (timestamp, price)}
+_REALTIME_CACHE_TTL = 10  # seconds — fresh enough for latency arb, avoids 200+ API calls/cycle
 
-    Research: Kalshi crypto markets lag spot by 30s-5min. If spot moved significantly
-    since the Kalshi market price was set, we have a latency edge.
+def get_realtime_crypto_price(asset: str = "btc") -> float:
+    """Get crypto price from Binance with 10s cache. For latency arb detection.
+
+    Research: Kalshi crypto markets lag spot by 30s-5min. 10s cache still captures
+    this lag while avoiding 200+ Binance calls per cycle.
     """
+    now = time.time()
+    cached = _realtime_price_cache.get(asset)
+    if cached and (now - cached[0]) < _REALTIME_CACHE_TTL:
+        return cached[1]
+
     symbol = {"btc": "BTCUSDT", "eth": "ETHUSDT", "sol": "SOLUSDT"}.get(asset.lower(), "BTCUSDT")
     try:
         resp = requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}", timeout=3)
-        return float(resp.json()["price"])
+        price = float(resp.json()["price"])
+        _realtime_price_cache[asset] = (now, price)
+        return price
     except Exception:
-        return 0.0
+        return cached[1] if cached else 0.0
 
 
 def get_fear_greed_index() -> dict:
@@ -2483,25 +2522,12 @@ def make_trade_decision(market: MarketInfo, forecast: ForecastResult, critic: Cr
         kelly_frac = min(kelly_frac * 1.5, 0.40)  # cap at 40% even for crypto
 
     # ── Streak-aware sizing: reduce bet progressively after consecutive losses ──
-    # Don't wait for circuit breaker at 5 losses — start reducing at 2
-    try:
-        recent_results = []
-        if TRADE_LOG_FILE.exists():
-            with open(TRADE_LOG_FILE) as f:
-                for line in reversed(f.readlines()[-20:]):
-                    entry = json.loads(line.strip())
-                    status = entry.get("result_status", "pending")
-                    if status == "won":
-                        break
-                    elif status == "lost":
-                        recent_results.append("lost")
-        consec_losses = len(recent_results)
-        if consec_losses >= 2:
-            # Scale: 2 losses → 75%, 3 → 56%, 4 → 42% (geometric decay)
-            streak_scale = 0.75 ** (consec_losses - 1)
-            kelly_frac *= max(0.25, streak_scale)  # Floor at 25% of normal
-    except Exception:
-        pass
+    # Uses cached streak count (computed once per cycle, not per market)
+    consec_losses = _get_cached_loss_streak()
+    if consec_losses >= 2:
+        # Scale: 2 losses → 75%, 3 → 56%, 4 → 42% (geometric decay)
+        streak_scale = 0.75 ** (consec_losses - 1)
+        kelly_frac *= max(0.25, streak_scale)  # Floor at 25% of normal
 
     # PROC-002 Task 4.2: Recovery mode — halve Kelly when drawdown > 10%
     if DRAWDOWN_PEAK_BALANCE > 0 and balance < DRAWDOWN_PEAK_BALANCE:
@@ -2639,6 +2665,10 @@ def score_market(market: MarketInfo) -> float:
     score = 0.0
     if market.volume > 0:
         score += min(10, math.log10(market.volume) * 2)
+    else:
+        score -= 15  # PENALTY: zero volume = no real liquidity, AMM-only fills
+    if market.open_interest == 0 and market.volume == 0:
+        score -= 10  # Extra penalty for completely untouched markets
     score += max(0, 10 - abs(market.yes_price - 50) * 0.2)
     dte = market.days_to_expiry
     # PRIORITY: short-expiry = fast feedback = faster adaptive learning
