@@ -2337,8 +2337,8 @@ def calculate_kelly(prob: float, price_cents: int, edge: float = 0.0) -> float:
         if edge <= 0:
             kelly_frac = 0.02  # Minimum data collection bet
         else:
-            # Scale linearly: edge * 3.0, clamp between 2% and 50%
-            kelly_frac = min(0.50, max(0.02, edge * 3.0))
+            # Scale linearly with edge, apply KELLY_FRACTION to stay consistent with classic path
+            kelly_frac = min(0.50, max(0.02, edge * 3.0 * KELLY_FRACTION))
         return kelly_frac
     
     # Classic Kelly calculation (fallback)
@@ -2570,8 +2570,8 @@ def make_trade_decision(market: MarketInfo, forecast: ForecastResult, critic: Cr
         pass
 
     # OBI confirmation signal (research: OBI > 0.65 predicts direction with 58% accuracy)
-    # Skip expensive API call in paper mode for most trades — only check for large positions
-    if kelly_frac > 0.03 and not DRY_RUN:
+    # Check for all non-trivial positions — also in paper mode for validation
+    if kelly_frac > 0.03:
         obi = get_orderbook_imbalance(market.ticker)
         # For BUY_YES: positive OBI = buying pressure = confirms our direction
         # For BUY_NO: negative OBI = selling pressure = confirms our direction
@@ -2644,11 +2644,6 @@ def filter_markets(markets: list) -> list:
             continue
         if m.volume < MIN_VOLUME:
             continue
-        if max(m.open_interest, m.volume) < MIN_LIQUIDITY:
-            continue
-        # Hard-filter: zero volume AND zero OI = ghost market, no real fills possible at ANY price
-        if m.volume == 0 and m.open_interest == 0:
-            continue
         dte = m.days_to_expiry
         if dte > MAX_DAYS_TO_EXPIRY or dte < MIN_DAYS_TO_EXPIRY:
             continue
@@ -2691,8 +2686,7 @@ def score_market(market: MarketInfo) -> float:
     # Sports: Kalshi sets close_time 14d even for tonight's games (admin window).
     # Parse the GAME DATE from the ticker (format: KXNBA...-DDMMMYY...) to detect tonight.
     # Example: KXNBATOTAL-26FEB26HOUORL → game date 26 Feb 2026
-    import re as _re
-    m = _re.search(r'-(\d{2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)(\d{2})', ticker)
+    m = re.search(r'-(\d{2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)(\d{2})', ticker)
     if m:
         _months = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,
                    "JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}
