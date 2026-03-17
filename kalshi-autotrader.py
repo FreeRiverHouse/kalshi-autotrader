@@ -2680,12 +2680,16 @@ def score_market(market: MarketInfo) -> float:
     else:               score -= 5  # >2 weeks: actively penalized
     if market.open_interest > 0:
         score += min(5, math.log10(market.open_interest + 1) * 1.5)
-    # Crypto bonus: always tradeable 24/7, highest settle frequency
+    # Crypto bonus: only if someone has actually traded (vol>0 or OI>0)
     ticker = market.ticker.upper()
+    has_activity = market.volume > 0 or market.open_interest > 0
     if any(x in ticker for x in ("KXBTC", "KXETH", "KXSOL")):
-        score += 8   # Crypto always gets boosted
-        if dte < 0.1:
-            score += 5  # Hourly crypto: absolute top priority
+        if has_activity:
+            score += 8   # Crypto with real activity gets boosted
+            if dte < 0.1:
+                score += 5  # Hourly crypto with activity: top priority
+        else:
+            score += 0  # No bonus for untouched AMM crypto (default 50¢ = no signal)
     # Multi-game parlay bonus: 87.5% WR historically — structural NO edge (any leg fails = win)
     if "KXMVESPORTSMULTIGAME" in ticker:
         score += 10
