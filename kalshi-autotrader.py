@@ -1252,14 +1252,15 @@ def get_crypto_prices() -> Optional[dict]:
     if cached:
         return cached
 
-    # Try CoinGecko first
+    # Try CoinGecko first (BTC + ETH + SOL)
     try:
         resp = requests.get(
-            "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd",
+            "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana&vs_currencies=usd",
             timeout=5)
         record_api_call("coingecko")
         data = resp.json()
-        result = {"btc": data["bitcoin"]["usd"], "eth": data["ethereum"]["usd"]}
+        result = {"btc": data["bitcoin"]["usd"], "eth": data["ethereum"]["usd"],
+                  "sol": data.get("solana", {}).get("usd", 0)}
         set_cached_response("crypto_prices", result)
         return result
     except Exception:
@@ -1269,7 +1270,9 @@ def get_crypto_prices() -> Optional[dict]:
     try:
         btc_resp = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", timeout=5)
         eth_resp = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=ETHUSDT", timeout=5)
-        result = {"btc": float(btc_resp.json()["price"]), "eth": float(eth_resp.json()["price"])}
+        sol_resp = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT", timeout=5)
+        result = {"btc": float(btc_resp.json()["price"]), "eth": float(eth_resp.json()["price"]),
+                  "sol": float(sol_resp.json()["price"])}
         set_cached_response("crypto_prices", result)
         return result
     except Exception:
@@ -3668,7 +3671,8 @@ def run_cycle(dry_run: bool = True, max_markets: int = 30, max_trades: int = 10)
     prices = get_crypto_prices()
     if prices:
         context["crypto_prices"] = prices
-        print(f"📈 BTC: ${prices['btc']:,.0f} | ETH: ${prices['eth']:,.0f}")
+        sol_str = f" | SOL: ${prices['sol']:,.0f}" if prices.get('sol') else ""
+        print(f"📈 BTC: ${prices['btc']:,.0f} | ETH: ${prices['eth']:,.0f}{sol_str}")
     else:
         print("⚠️ No crypto prices available")
 
