@@ -166,18 +166,18 @@ BASE_URL = "https://api.elections.kalshi.com"
 
 # ── Paper / Live mode ──
 DRY_RUN = True  # Paper mode by default. Use --live to override.
-VIRTUAL_BALANCE = 10000.0  # Virtual balance for paper mode — large bankroll, fake money
+VIRTUAL_BALANCE = 100.0  # $100 virtual balance — simulate a real $100 deposit
 
-# ── Trading parameters (Grok-tuned 2026-03-01) ──
-# BUY_NO: 66.7% WR +$4.53.  BUY_YES: 39.9% WR -$7.98 → DISABLED (needs 54%+ to break even)
-MIN_EDGE_BUY_NO  = 0.01   # LOWERED for testing (was 0.03)
-MIN_EDGE_BUY_YES = 0.04   # LOWERED for testing (was 0.20) — now should allow some YES trades
+# ── Trading parameters (2026-03-16 SELECTIVE STRATEGY) ──
+# Focus on quality over quantity: only trade where Grok 4.20 finds real edge
+MIN_EDGE_BUY_NO  = 0.03   # 3% min edge for BUY_NO (calibration shows 5% calc = 40%+ real edge)
+MIN_EDGE_BUY_YES = 0.08   # 8% min edge for BUY_YES (YES historically weak, need big edge)
 CALIBRATION_FACTOR = 0.65  # legacy: kept for dynamic calibration baseline
 CALIBRATION_FACTOR_YES = 0.25  # YES: shrink even harder (Grok: 0.25-0.30)
 CALIBRATION_FACTOR_NO  = 0.62  # NO: let breathe a bit more (Grok: 0.60-0.65)
 
 # ── MULTIGAME special overrides (87.5% WR — golden goose) ──
-MULTIGAME_MIN_EDGE_BUY_NO  = 0.010  # Slightly more aggressive: 1% (Grok rec: 0.8-1%)
+MULTIGAME_MIN_EDGE_BUY_NO  = 0.03   # 3% for multigame (strong WR, can be looser)
 MULTIGAME_MAX_NO_PRICE_CENTS = 82   # Raised 80→82¢ (Grok rec: "can go to 82-85")
 
 
@@ -235,14 +235,14 @@ def get_calibration_factor(trade_history: list | None = None) -> float:
         return _compute_dynamic_calibration_factor(trade_history)
     return CALIBRATION_FACTOR  # Shrink LLM/heuristic probs toward 50% to correct overconfidence
                             # (Grok: predicted 71.5% → actual 46.2%, ratio ~0.65)
-MIN_EDGE = 0.0
+MIN_EDGE = 0.03            # 3% global minimum edge (was 0 — allowed zero-edge data-collection trades)
 MAX_EDGE_CAP_YES = 0.06   # YES >6% edge = almost certainly miscalibrated (28.6% WR at >10%)
 MAX_EDGE_CAP_NO  = 0.10   # NO works well even at high edge
-MAX_POSITION_PCT = 0.15   # 15% per position — aggressive mode
-KELLY_FRACTION = 0.15      # Reduced from 0.25 — more conservative sizing in paper mode
+MAX_POSITION_PCT = 0.10   # 10% per position — moderate sizing
+KELLY_FRACTION = 0.15      # Conservative sizing in paper mode
 MIN_BET_CENTS = 5
-MAX_BET_CENTS = 200        # $2 max per trade (2% of $100 bankroll — conservative until profitable)
-MAX_POSITIONS = 15         # Max open positions (Grok rec) — overridden by dynamic_max_positions()
+MAX_BET_CENTS = 100        # $1 max per trade — micro-betting on $100 bankroll
+MAX_POSITIONS = 30         # Max open positions (97.7% WR → low concurrent loss risk)
 
 
 def dynamic_max_positions(balance: float) -> int:
@@ -276,17 +276,15 @@ MIN_PROFIT_TO_TRAIL = 0.10   # Start trailing only after +10% unrealized
 EARLY_EXIT_NEAR_EXPIRY_HOURS = 2  # Force exit if <2h to expiry and in profit
 HARD_STOP_LOSS_PCT = -0.30   # Hard stop: exit if position is -30% or worse
 
-# ── Market scanning filters ──
-MIN_VOLUME = 0            # No hard exclusion — thin markets exist in live too
-MIN_LIQUIDITY = 0         # No hard exclusion
-# Thin market fill simulation: volume < THIN_MARKET_VOLUME → only fill with probability
-# In live: BTC/ETH ladder markets fill ~15% of the time (rare counterpart at 50¢ default)
+# ── Market scanning filters (2026-03-16 SELECTIVE) ──
+MIN_VOLUME = 0            # Allow all volumes — edge thresholds + thin-market cap (2 contracts) protect us
+MIN_LIQUIDITY = 0         # No hard exclusion on liquidity
 THIN_MARKET_VOLUME = 500          # below this = "thin" → AMM size-limited
 # Kalshi AMM reality: fills small orders always, but price moves with size
 # volume=0 → max 2 contracts at 50¢ (AMM impact ~1¢ per contract)
 # volume 1-499 → max 5 contracts (some organic flow supplements AMM)
 MAX_DAYS_TO_EXPIRY = 14  # Grok: ≤14d for sports (less uncertainty); crypto hourly unaffected
-MIN_DAYS_TO_EXPIRY = 0.005  # ~30 minutes
+MIN_DAYS_TO_EXPIRY = 0.02  # ~30 minutes (slightly raised from 0.005)
 MIN_PRICE_CENTS = 5
 MAX_PRICE_CENTS = 95   # Allow full price range
 
@@ -357,12 +355,12 @@ HIGH_EDGE_CLUSTER_ALERT_FILE = Path(__file__).parent / "kalshi-high-edge-cluster
 # ── Risk limits (GROK-TRADE-002: portfolio-level) ──
 MAX_EXPOSURE_PCT = 0.50          # Don't trade if total open positions value > 50% of balance
 MAX_CATEGORY_EXPOSURE_PCT = 0.30 # Max 30% in any single category (crypto, weather, sports)
-MAX_DAILY_TRADES = 200           # Hard cap on trades per day (relaxed for paper mode data collection)
-MAX_DAILY_EXPOSURE_USD = 50.0    # GROK-TRADE-004: Absolute $ cap on daily new exposure
+MAX_DAILY_TRADES = 50            # Selective strategy: fewer, better trades
+MAX_DAILY_EXPOSURE_USD = 100.0   # Raised — selective trades deserve bigger allocation
 
 # ── Paper trade state (bankroll/positions tracking for dashboard) ──
 PAPER_STATE_FILE = _DATA_DIR / "paper-trade-state.json"
-PAPER_STARTING_BANKROLL_CENTS = 1000000  # $10,000 virtual bankroll — paper mode, fake money
+PAPER_STARTING_BANKROLL_CENTS = 10000  # $100 virtual bankroll — simulating a real $100 deposit
 
 # ── Structured logging (GROK-TRADE-002) ──
 AUTOTRADER_LOG_FILE = _DATA_DIR / "kalshi-autotrader.log"
@@ -2443,7 +2441,8 @@ def filter_markets(markets: list) -> list:
             continue
         if max(m.open_interest, m.volume) < MIN_LIQUIDITY:
             continue
-        # Skip pure 50/50 markets with no volume (no signal)
+        # RESTORED 2026-03-16: The user demands paper-mode to PERFECTLY reflect real money.
+        # 50c theoretical prices on 0 volume/0 OI markets are illusory. We cannot get filled at 50c in real life.
         if m.yes_price == 50 and m.volume == 0 and m.open_interest == 0:
             dte_check = m.days_to_expiry
             if dte_check > 0.083:  # Skip only if more than 2 hours to expiry
@@ -3305,7 +3304,7 @@ def run_cycle(dry_run: bool = True, max_markets: int = 30, max_trades: int = 10)
         # In paper mode, ALWAYS use paper balance — never use real balance
         paper_st = load_paper_state()
         paper_balance = paper_st.get("current_balance_cents", PAPER_STARTING_BANKROLL_CENTS) / 100.0
-        balance = max(paper_balance, VIRTUAL_BALANCE)  # always use paper, minimum $10k
+        balance = paper_balance  # Use exact paper balance — simulating real $100 deposit
         print(f"   📝 Paper balance: ${balance:.2f}")
 
     # ── Positions ──
@@ -3343,7 +3342,7 @@ def run_cycle(dry_run: bool = True, max_markets: int = 30, max_trades: int = 10)
     else:
         positions = get_positions()
         num_positions = len(positions)
-    dyn_max_pos = 500 if dry_run else dynamic_max_positions(balance)  # paper mode: high limit for data collection
+    dyn_max_pos = dynamic_max_positions(balance)  # Use real dynamic formula even in paper mode
     print(f"📊 Open positions: {num_positions}/{dyn_max_pos} (dynamic, balance ${balance:.0f})")
 
     # ── Position Management: Trailing Stop / Early Exit (TRADE-017) ──
@@ -3760,8 +3759,8 @@ Examples:
         """)
 
     parser.add_argument("--live", action="store_true", help="Enable LIVE trading (default: paper)")
-    parser.add_argument("--markets", type=int, default=50, help="Max markets to analyze (default: 50)")
-    parser.add_argument("--max-trades", type=int, default=20, help="Max trades per cycle (default: 20)")
+    parser.add_argument("--markets", type=int, default=30, help="Max markets to analyze (default: 30)")
+    parser.add_argument("--max-trades", type=int, default=10, help="Max trades per cycle (default: 10)")
     parser.add_argument("--loop", type=int, default=0, help="Loop interval in seconds (0 = single run)")
     parser.add_argument("--min-edge", type=float, default=None, help="Override minimum edge")
     parser.add_argument("--kelly", type=float, default=None, help="Override Kelly fraction")

@@ -15,6 +15,9 @@ import db as _db
 
 app = Flask(__name__)
 
+import sys
+if "__file__" not in globals():
+    __file__ = sys.argv[0] if sys.argv else "kalshi-dashboard.py"
 DATA_DIR    = Path(__file__).parent / "data" / "trading"
 _SSD_DATA   = Path("/Volumes/DATI-SSD/kalshi-logs")
 PAPER_STATE = (_SSD_DATA / "paper-trade-state.json") if _SSD_DATA.exists() else DATA_DIR / "paper-trade-state.json"
@@ -225,6 +228,7 @@ def api_all():
             "starting_balance_usd": round((ps.get("starting_balance_cents") or 10000) / 100, 2),
             "open_positions":       len(ps.get("positions") or []),
         },
+        "forecaster": cycle_stats.get("forecaster", "llm") if "cycle_stats" in locals() else "Grok 4.20",
         "trader_running": pid is not None,
         "trader_pid":     pid,
         "watchdog":       wd,
@@ -291,7 +295,7 @@ HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>⚡ Kalshi AutoTrader</title>
+<title>⚡ Kalshi AutoTrader • Live Dashboard</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -556,7 +560,7 @@ body::after{
 <div class="wrap">
 
   <!-- RECENT BETS LIVE FEED -->
-  <div class="sec">Ultime Bet <span style="color:var(--cyan);margin-left:.4rem" x-text="trades.length?'('+trades.length+')':''"></span></div>
+  <div class="sec">Ultime Operazioni <span style="color:var(--cyan);margin-left:.4rem" x-text="trades.length?'('+trades.length+')':''"></span></div>
   <div class="card" style="padding:1rem 1.15rem;margin-bottom:.9rem">
     <div x-show="trades.length===0" style="color:var(--text3);font-size:.8rem;text-align:center;padding:1.5rem">
       Nessun trade ancora — l'algo sta scansionando mercati…
@@ -607,7 +611,8 @@ body::after{
   <div class="sgrid">
     <div class="card sc feat">
       <div class="sv cyan" :class="{'gc': m.current_balance_usd > m.starting_balance_usd}" x-text="'$'+(m.current_balance_usd||0).toFixed(2)">—</div>
-      <div class="sl">Bankroll</div>
+      <div class="sl">Paper Bankroll</div>
+      <div class="ss" x-text="m.forecaster || 'LLM'" style="color:var(--purple);margin-top:4px"></div>
       <div class="ss" x-text="'start $'+(m.starting_balance_usd||0).toFixed(2)"></div>
     </div>
     <div class="card sc">
@@ -892,9 +897,9 @@ function dash(){
     paramHistory:[],
     timeRange:'7d',
 
-    // GOLDEN CONFIG for comparison
-    golden:{MIN_EDGE_BUY_NO:'3%',MIN_EDGE_BUY_YES:'8%',KELLY_FRACTION:'0.25',
-            MAX_BET_CENTS:'500',MAX_POSITIONS:'15',DAILY_LOSS_LIMIT_CENTS:'500'},
+    // GOLDEN CONFIG for comparison (selective Grok 4.20 strategy)
+    golden:{MIN_EDGE_BUY_NO:'0.03',MIN_EDGE_BUY_YES:'0.08',KELLY_FRACTION:'0.15',
+            MAX_BET_CENTS:'100',MAX_POSITIONS:'30',DAILY_LOSS_LIMIT_CENTS:'—'},
 
     get lastActText(){
       if(!this.trades||!this.trades.length) return '';
@@ -1005,10 +1010,11 @@ function dash(){
       if(this.timeRange==='all'||!data||!data.length) return data;
       const now=Date.now();
       const ranges={'7d':7*24*3600*1000,'14d':14*24*3600*1000,'30d':30*24*3600*1000};
-      const cutoff=now-ranges[this.timeRange]||ranges['7d'];
+      const cutoff=now-(ranges[this.timeRange]||ranges['7d']);
       return data.filter(d=>{
-        const ts=new Date(d[dateField]||d.ts||'').replace(' ','T').getTime();
-        return ts>=cutoff;
+        const raw=d[dateField]||d.ts||'';
+        const ts=new Date(String(raw).replace(' ','T')+'Z').getTime();
+        return !isNaN(ts) && ts>=cutoff;
       });
     },
 
@@ -1019,7 +1025,7 @@ function dash(){
 
       /* Bankroll — fallback to cycle data when no settled trades yet */
       let bk=m.bankroll_series&&m.bankroll_series.length?f(m.bankroll_series):null;
-      if(!bk&&cycles&&cycles.length) bk=f(cycles.map(c=>({t:c.t,v:c.b})));
+      if(!bk&&cycles&&cycles.length) bk=f(cycles.map(c=>({t:c.t,v:c.b/100})));  /* cents→dollars */
       if(!bk&&roi&&roi.length) bk=f(roi.map(r=>({t:r.t,v:+(m.starting_balance_usd+r.v/100*m.starting_balance_usd).toFixed(2)})));
       if(bk&&bk.length){
         const bkLabel=m.bankroll_series&&m.bankroll_series.length?'Bankroll ($)':'Balance per Ciclo ($)';
@@ -1104,17 +1110,18 @@ function dash(){
       if(fCycles&&fCycles.length){
         const N=fCycles.length;
         // x-axis: abbreviated time label based on span
-        const first=new Date(fCycles[0].t.replace(' ','T')+'Z');
-        const last=new Date(fCycles[N-1].t.replace(' ','T')+'Z');
+        const first=new Date(String(fCycles[0].t).replace(' ','T')+'Z');
+        const last=new Date(String(fCycles[N-1].t).replace(' ','T')+'Z');
         const spanH=(last-first)/3600000;
         const fmt=t=>{
-          const d=new Date(t.replace(' ','T')+'Z');
+          const d=new Date(String(t).replace(' ','T')+'Z');
+          if(isNaN(d)) return t;
           if(spanH<=6) return d.toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit',timeZone:'UTC'});
           if(spanH<=48) return d.toLocaleString('it-IT',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'UTC'});
           return d.toLocaleDateString('it-IT',{month:'2-digit',day:'2-digit',timeZone:'UTC'});
         };
         const cycleLabels=fCycles.map(c=>fmt(c.t));
-        const balData=fCycles.map(c=>({x:fmt(c.t),y:c.b}));
+        const balData=fCycles.map(c=>({x:fmt(c.t),y:c.b/100}));  /* cents→dollars */
         const tpData=fCycles.map(c=>c.tp);
         this.mk('ch-cycle-balance',{...b,
           chart:{...b.chart,type:'area',height:240},
