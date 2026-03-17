@@ -2644,10 +2644,12 @@ def filter_markets(markets: list) -> list:
             continue
         if m.volume < MIN_VOLUME:
             continue
-        # Ghost market filter: vol=0 + OI=0 + stale AMM default price = no real price signal
-        # These 50/50 markets waste LLM calls — Critic always vetoes the hallucinated forecasts
+        # Ghost market filter: vol=0 + OI=0 + 50¢ price + far from expiry = no price discovery
+        # Near-term AMM markets (crypto hourly) with <2h to settle ARE tradeable (AMM fills, 97.7% WR)
         if m.volume == 0 and m.open_interest == 0 and m.yes_price == 50:
-            continue
+            dte_h = m.days_to_expiry * 24
+            if dte_h > 2:  # Only filter if >2h — near-term crypto markets stay
+                continue
         dte = m.days_to_expiry
         if dte > MAX_DAYS_TO_EXPIRY or dte < MIN_DAYS_TO_EXPIRY:
             continue
