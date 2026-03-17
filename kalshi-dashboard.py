@@ -942,7 +942,7 @@ function dash(){
             MAX_BET_CENTS:'100',MAX_POSITIONS:'30',MAX_NO_PRICE_CENTS:'69',
             MAX_POSITION_PCT:'0.05',MAX_EDGE_CAP_YES:'0.08',MAX_EDGE_CAP_NO:'0.20',
             MULTIGAME_MIN_EDGE_BUY_NO:'0.05',DAILY_LOSS_LIMIT_PCT:'0.03',
-            MIN_VOLUME:'10',MIN_LIQUIDITY:'5'},
+            MIN_VOLUME:'0',MIN_LIQUIDITY:'0'},
 
     get lastActText(){
       if(!this.trades||!this.trades.length) return '';

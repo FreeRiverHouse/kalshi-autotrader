@@ -277,8 +277,8 @@ EARLY_EXIT_NEAR_EXPIRY_HOURS = 2  # Force exit if <2h to expiry and in profit
 HARD_STOP_LOSS_PCT = -0.30   # Hard stop: exit if position is -30% or worse
 
 # ── Market scanning filters (2026-03-16 SELECTIVE) ──
-MIN_VOLUME = 10           # Hard-filter: no real fills possible on zero/near-zero volume markets
-MIN_LIQUIDITY = 5         # Require at least SOME open interest or volume to ensure real orderbook
+MIN_VOLUME = 0            # AMM markets have real liquidity even at vol=0 — filter ghost markets below
+MIN_LIQUIDITY = 0         # OI can be 0 on fresh hourly crypto contracts (AMM provides fills)
 THIN_MARKET_VOLUME = 500          # below this = "thin" → AMM size-limited
 # Kalshi AMM reality: fills small orders always, but price moves with size
 # volume=0 → max 2 contracts at 50¢ (AMM impact ~1¢ per contract)
@@ -2644,6 +2644,12 @@ def filter_markets(markets: list) -> list:
             continue
         if m.volume < MIN_VOLUME:
             continue
+        # Ghost market filter: vol=0 + OI=0 + stale price (50/50) + far from expiry = no real market
+        # AMM provides liquidity even at vol=0, but only for near-term contracts
+        if m.volume == 0 and m.open_interest == 0 and m.yes_price == 50:
+            dte_h = m.days_to_expiry * 24
+            if dte_h > 6:  # >6h to expiry with no activity = ghost market
+                continue
         dte = m.days_to_expiry
         if dte > MAX_DAYS_TO_EXPIRY or dte < MIN_DAYS_TO_EXPIRY:
             continue
