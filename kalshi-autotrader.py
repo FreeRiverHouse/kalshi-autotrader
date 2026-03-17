@@ -164,7 +164,17 @@ else:
 
 BASE_URL = "https://api.elections.kalshi.com"
 
-# ── Paper / Live mode ──
+# ══════════════════════════════════════════════════════════════════════════════
+# PAPER MODE OBJECTIVE: Perfectly simulate LIVE trading with REAL money.
+# Every paper trade MUST be viable in live mode. Paper mode exists ONLY to
+# collect data for strategy tuning before deploying real capital.
+# RULES:
+#   - Non-crypto markets require MIN_VOLUME >= 50 (no ghost markets)
+#   - AMM spread simulated: +3¢ on vol=0, +1¢ on vol<500 (execution cost)
+#   - Position sizing must match live constraints (Kelly * KELLY_FRACTION)
+#   - Settlement/PnL must account for spread costs
+#   - Win rate is MEANINGLESS if trades aren't live-viable
+# ══════════════════════════════════════════════════════════════════════════════
 DRY_RUN = True  # Paper mode by default. Use --live to override.
 VIRTUAL_BALANCE = 100.0  # $100 virtual balance — simulate a real $100 deposit
 
