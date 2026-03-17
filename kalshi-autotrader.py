@@ -2644,12 +2644,10 @@ def filter_markets(markets: list) -> list:
             continue
         if m.volume < MIN_VOLUME:
             continue
-        # Ghost market filter: vol=0 + OI=0 + stale price (50/50) + far from expiry = no real market
-        # AMM provides liquidity even at vol=0, but only for near-term contracts
+        # Ghost market filter: vol=0 + OI=0 + stale AMM default price = no real price signal
+        # These 50/50 markets waste LLM calls — Critic always vetoes the hallucinated forecasts
         if m.volume == 0 and m.open_interest == 0 and m.yes_price == 50:
-            dte_h = m.days_to_expiry * 24
-            if dte_h > 6:  # >6h to expiry with no activity = ghost market
-                continue
+            continue
         dte = m.days_to_expiry
         if dte > MAX_DAYS_TO_EXPIRY or dte < MIN_DAYS_TO_EXPIRY:
             continue
