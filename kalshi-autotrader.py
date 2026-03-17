@@ -3819,7 +3819,10 @@ def run_cycle(dry_run: bool = True, max_markets: int = 30, max_trades: int = 10)
                 print(f"   ⚠️ Choppy+high-vol for {asset_name.upper()} — trading anyway per Grok rec C")
 
         # Step 1: FORECAST
-        if use_heuristic:
+        # Crypto hourly markets: ALWAYS use heuristic (log-normal model is mathematically precise)
+        # LLM hallucinates on crypto strike-price markets (contradicts own reasoning, wrong probability)
+        use_heuristic_for_this = use_heuristic or mkt_type == "crypto"
+        if use_heuristic_for_this:
             print(f"   🧮 Heuristic ({mkt_type}/{detect_sport(market)})...")
             forecast = heuristic_forecast(market, mkt_context)
         else:
@@ -3838,7 +3841,7 @@ def run_cycle(dry_run: bool = True, max_markets: int = 30, max_trades: int = 10)
             continue
 
         # Step 2: CRITIQUE
-        if use_heuristic:
+        if use_heuristic_for_this:
             critic = heuristic_critique(market, forecast)
         else:
             print(f"   🔎 LLM Critiquing...")
@@ -3964,7 +3967,7 @@ def run_cycle(dry_run: bool = True, max_markets: int = 30, max_trades: int = 10)
     duration = time.time() - cycle_start
     print(f"\n{'='*70}")
     print(f"📊 CYCLE SUMMARY")
-    print(f"   Forecaster: {'🧮 HEURISTIC' if use_heuristic else '🧠 LLM'}")
+    print(f"   Forecaster: {'🧮 HEURISTIC' if use_heuristic else '🧠 LLM (crypto→heuristic)'}")
     print(f"   Duration: {duration:.1f}s")
     print(f"   Markets scanned: {len(markets)}")
     print(f"   Markets analyzed: {min(len(top_markets), max_markets)}")
