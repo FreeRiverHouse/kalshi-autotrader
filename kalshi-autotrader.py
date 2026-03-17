@@ -2470,10 +2470,38 @@ def make_trade_decision(market: MarketInfo, forecast: ForecastResult, critic: Cr
     # Kelly sizing (PROC-002 Task 5.2: apply vol regime scaling)
     kelly_frac = calculate_kelly(final_prob if action == "BUY_YES" else (1 - final_prob), side_price, edge)
 
+    # ── Confidence-weighted Kelly: low confidence = smaller position ──
+    confidence = forecast.confidence if forecast else "medium"
+    if confidence == "low":
+        kelly_frac *= 0.5   # Half size on low confidence forecasts
+    elif confidence == "high":
+        kelly_frac *= 1.15  # Slight boost for high confidence (capped by MAX_POSITION_PCT later)
+
     # ── CRYPTO category Kelly boost ×1.5 (Grok rec: 94.7% WR confirms massive edge) ──
     _is_crypto = any(x in ticker_up for x in ("BTC", "ETH", "KXBTC", "KXETH", "CRYPTO"))
     if _is_crypto:
         kelly_frac = min(kelly_frac * 1.5, 0.40)  # cap at 40% even for crypto
+
+    # ── Streak-aware sizing: reduce bet progressively after consecutive losses ──
+    # Don't wait for circuit breaker at 5 losses — start reducing at 2
+    try:
+        recent_results = []
+        if TRADE_LOG_FILE.exists():
+            with open(TRADE_LOG_FILE) as f:
+                for line in reversed(f.readlines()[-20:]):
+                    entry = json.loads(line.strip())
+                    status = entry.get("result_status", "pending")
+                    if status == "won":
+                        break
+                    elif status == "lost":
+                        recent_results.append("lost")
+        consec_losses = len(recent_results)
+        if consec_losses >= 2:
+            # Scale: 2 losses → 75%, 3 → 56%, 4 → 42% (geometric decay)
+            streak_scale = 0.75 ** (consec_losses - 1)
+            kelly_frac *= max(0.25, streak_scale)  # Floor at 25% of normal
+    except Exception:
+        pass
 
     # PROC-002 Task 4.2: Recovery mode — halve Kelly when drawdown > 10%
     if DRAWDOWN_PEAK_BALANCE > 0 and balance < DRAWDOWN_PEAK_BALANCE:

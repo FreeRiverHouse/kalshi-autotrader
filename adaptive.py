@@ -36,11 +36,32 @@ def _clamp(name: str, value: float) -> float:
     return max(lo, min(hi, value))
 
 
+def _compute_category_pf(trades: list) -> dict:
+    """Compute profit factor per category for diagnostics."""
+    from collections import defaultdict
+    cats = defaultdict(lambda: {"profit": 0, "loss": 0, "won": 0, "total": 0})
+    for t in trades:
+        cat = t.get("category") or "other"
+        pnl = t.get("pnl_cents") or 0
+        cats[cat]["total"] += 1
+        if pnl > 0:
+            cats[cat]["profit"] += pnl
+            cats[cat]["won"] += 1
+        elif pnl < 0:
+            cats[cat]["loss"] += abs(pnl)
+    result = {}
+    for cat, v in cats.items():
+        pf = round(v["profit"] / v["loss"], 2) if v["loss"] > 0 else (99.0 if v["profit"] > 0 else 0.0)
+        wr = round(v["won"] / v["total"] * 100, 1) if v["total"] > 0 else 0
+        result[cat] = {"pf": pf, "wr": wr, "n": v["total"]}
+    return result
+
+
 def _get_rolling_trades(window: int = ADAPT_WINDOW) -> list[dict]:
     """Fetch last `window` settled trades from SQLite."""
     with _db.get_conn() as conn:
         rows = conn.execute("""
-            SELECT action, result_status, edge, forecast_prob, pnl_cents, cost_cents
+            SELECT action, result_status, edge, forecast_prob, pnl_cents, cost_cents, category
             FROM trades
             WHERE result_status IN ('won', 'lost')
             ORDER BY settled_at DESC
@@ -174,6 +195,7 @@ def compute_adaptive_params(current: dict) -> dict:
                 "CALIBRATION_FACTOR_NO": cal_no_reason,
                 "KELLY_FRACTION": kelly_reason,
             },
+            "by_category": _compute_category_pf(trades),
         },
     }
 
