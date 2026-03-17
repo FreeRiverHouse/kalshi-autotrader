@@ -169,11 +169,13 @@ BASE_URL = "https://api.elections.kalshi.com"
 # Every paper trade MUST be viable in live mode. Paper mode exists ONLY to
 # collect data for strategy tuning before deploying real capital.
 # RULES:
-#   - Non-crypto markets require MIN_VOLUME >= 50 (no ghost markets)
+#   - vol=0 AND open_interest=0 = GHOST MARKET → NEVER trade (no counterparty)
+#   - Non-crypto markets require volume >= 1 (at least 1 real trade)
 #   - AMM spread simulated: +3¢ on vol=0, +1¢ on vol<500 (execution cost)
 #   - Position sizing must match live constraints (Kelly * KELLY_FRACTION)
 #   - Settlement/PnL must account for spread costs
 #   - Win rate is MEANINGLESS if trades aren't live-viable
+#   - If a trade can't fill in live mode, it MUST NOT execute in paper mode
 # ══════════════════════════════════════════════════════════════════════════════
 DRY_RUN = True  # Paper mode by default. Use --live to override.
 VIRTUAL_BALANCE = 100.0  # $100 virtual balance — simulate a real $100 deposit
@@ -2746,12 +2748,13 @@ def filter_markets(markets: list) -> list:
             if len(_filter_stats["_nc_samples"]) < 50:
                 _filter_stats["_nc_samples"].append((m.ticker, m.volume))
             continue
-        # Ghost market filter for crypto: vol=0 + OI=0 + 50¢ + far from expiry = no signal
-        if is_crypto and m.volume == 0 and m.open_interest == 0 and m.yes_price == 50:
-            dte_h = m.days_to_expiry * 24
-            if dte_h > 2:
-                _filter_stats["ghost_crypto"] += 1
-                continue
+        # Ghost market filter: vol=0 + OI=0 = NO real counterparty, NOT tradable in live.
+        # AMM shows 50¢ default but there's zero price discovery.
+        # In live you'd place a limit order and it MIGHT not fill, or fill at unknown spread.
+        # RULE: if nobody has EVER traded this market, we don't touch it.
+        if m.volume == 0 and m.open_interest == 0:
+            _filter_stats["ghost_crypto"] += 1
+            continue
         dte = m.days_to_expiry
         if dte > MAX_DAYS_TO_EXPIRY or dte < MIN_DAYS_TO_EXPIRY:
             _filter_stats["dte"] += 1
