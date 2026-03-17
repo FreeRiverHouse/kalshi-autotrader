@@ -939,7 +939,7 @@ function dash(){
     timeRange:'7d',
 
     // GOLDEN CONFIG for comparison (Becker research + 8220 trade data-driven)
-    golden:{MIN_EDGE_BUY_NO:'0.10',MIN_EDGE_BUY_YES:'0.03',KELLY_FRACTION:'0.15',
+    golden:{MIN_EDGE_BUY_NO:'0.07',MIN_EDGE_BUY_YES:'0.03',KELLY_FRACTION:'0.15',
             MAX_BET_CENTS:'100',MAX_POSITIONS:'30',MAX_NO_PRICE_CENTS:'69',
             MAX_POSITION_PCT:'0.05',MAX_EDGE_CAP_YES:'0.08',MAX_EDGE_CAP_NO:'0.20',
             MULTIGAME_MIN_EDGE_BUY_NO:'0.05',DAILY_LOSS_LIMIT_PCT:'0.03',

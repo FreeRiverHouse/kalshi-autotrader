@@ -170,7 +170,7 @@ VIRTUAL_BALANCE = 100.0  # $100 virtual balance — simulate a real $100 deposit
 
 # ── Trading parameters (2026-03-16 SELECTIVE STRATEGY) ──
 # Focus on quality over quantity: only trade where Grok 4.20 finds real edge
-MIN_EDGE_BUY_NO  = 0.10   # 10% min edge for BUY_NO — DATA: <10% edge = 55% WR (coin flip), 10%+ = 85.9% WR
+MIN_EDGE_BUY_NO  = 0.07   # 7% min edge for BUY_NO — DATA: 7%+ edge = 98.3% WR, ROI 85-93% with 1-3¢ spread
 MIN_EDGE_BUY_YES = 0.03   # 3% min edge for BUY_YES — DATA: 3-5% edge = 98.2% WR (sweet spot)
 CALIBRATION_FACTOR = 0.65  # legacy: kept for dynamic calibration baseline
 CALIBRATION_FACTOR_YES = 0.25  # YES: shrink even harder (Grok: 0.25-0.30)
@@ -2499,13 +2499,14 @@ def make_trade_decision(market: MarketInfo, forecast: ForecastResult, critic: Cr
     else:
         action, side_price, edge = "BUY_NO", market.no_price, abs(edge_yes)
 
-    # REALISTIC PAPER: simulate AMM spread on thin markets
-    # In live mode, you pay the ask (not mid). Vol=0 markets have ~3-5¢ spread.
-    # This reduces edge by the spread cost, making paper results match live expectations.
+    # REALISTIC PAPER: simulate AMM spread as execution cost (NOT as edge filter)
+    # In live mode, you pay the ask (not mid). Vol=0 markets have ~3¢ spread.
+    # The spread increases the cost of entry, reducing profit — but does NOT reduce
+    # the forecast edge (which measures probability accuracy, not execution quality).
+    paper_spread = 0
     if DRY_RUN and market.volume < THIN_MARKET_VOLUME:
-        spread = PAPER_SPREAD_CENTS if market.volume == 0 else max(1, PAPER_SPREAD_CENTS // 2)
-        side_price += spread  # Pay ask, not mid → higher cost, lower profit
-        edge -= spread / 100.0  # Spread eats into edge
+        paper_spread = PAPER_SPREAD_CENTS if market.volume == 0 else max(1, PAPER_SPREAD_CENTS // 2)
+        side_price += paper_spread  # Pay ask, not mid → higher cost, lower profit
 
     # ── MULTIGAME override: lower edge bar + higher price cap (87.5% WR — golden goose) ──
     is_multigame = any(x in market.ticker.upper() for x in ("MULTIGAME", "COMBO"))
@@ -2521,7 +2522,7 @@ def make_trade_decision(market: MarketInfo, forecast: ForecastResult, critic: Cr
 
     # 2. Scaled edge requirement for expensive BUY_NO (re-enabled: data shows bad R/R at high prices)
     if action == "BUY_NO" and NO_PRICE_EDGE_SCALE and side_price > 50:
-        scaled_min_edge = 0.10 + (side_price - 50) * 0.003  # 50¢→10%, 55¢→11.5%, 60¢→13%, 65¢→14.5%
+        scaled_min_edge = 0.07 + (side_price - 50) * 0.003  # 50¢→7%, 55¢→8.5%, 60¢→10%, 65¢→11.5%
         if edge < scaled_min_edge:
             return TradeDecision(action="SKIP", edge=edge, kelly_size=0, contracts=0, price_cents=side_price,
                                 reason=f"BUY_NO {side_price}¢ needs edge≥{scaled_min_edge:.1%}, got {edge:.1%}",

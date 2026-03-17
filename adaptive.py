@@ -24,7 +24,7 @@ ADAPT_WINDOW  = 50    # look at last N settled trades for metrics
 # Clamp ranges (safety rails — never go outside these)
 CLAMPS = {
     "MIN_EDGE_BUY_YES":      (0.02,  0.10),   # 2% – 10% (DATA: 3-5% = 98% WR sweet spot)
-    "MIN_EDGE_BUY_NO":       (0.08,  0.15),   # 8% – 15% (DATA: <10% = coin flip, 10%+ = 85.9% WR)
+    "MIN_EDGE_BUY_NO":       (0.05,  0.15),   # 5% – 15% (DATA: 7%+ = 98.3% WR with spread, allow adaptive to explore)
     "CALIBRATION_FACTOR_YES": (0.25,  0.60),
     "CALIBRATION_FACTOR_NO":  (0.50,  0.85),
     "KELLY_FRACTION":         (0.10,  0.40),
