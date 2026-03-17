@@ -961,6 +961,30 @@ def get_positions() -> list:
     return result.get("market_positions", [])
 
 
+def get_orderbook_imbalance(ticker: str) -> float:
+    """Fetch orderbook and compute OBI = (bid_vol - ask_vol) / (bid_vol + ask_vol).
+
+    Research (Becker): OBI > 0.65 predicts price movement with 58% accuracy.
+    Returns OBI in [-1, 1]. Positive = buying pressure, negative = selling pressure.
+    Returns 0.0 on any error (neutral — don't block trade).
+    """
+    try:
+        result = kalshi_api("GET", f"/trade-api/v2/markets/{ticker}/orderbook")
+        if "error" in result:
+            return 0.0
+        yes_bids = result.get("orderbook", {}).get("yes", [])
+        no_bids = result.get("orderbook", {}).get("no", [])
+        # Sum all bid volumes (YES side = buying YES, NO side = buying NO)
+        bid_vol = sum(level[1] for level in yes_bids if len(level) >= 2) if yes_bids else 0
+        ask_vol = sum(level[1] for level in no_bids if len(level) >= 2) if no_bids else 0
+        total = bid_vol + ask_vol
+        if total == 0:
+            return 0.0
+        return round((bid_vol - ask_vol) / total, 3)
+    except Exception:
+        return 0.0
+
+
 def place_order(ticker: str, side: str, price_cents: int, count: int, dry_run: bool = True) -> dict:
     if dry_run:
         return {"dry_run": True, "ticker": ticker, "side": side, "price": price_cents,
@@ -1221,6 +1245,20 @@ def get_crypto_prices() -> Optional[dict]:
         return result
     except Exception:
         return None
+
+
+def get_realtime_crypto_price(asset: str = "btc") -> float:
+    """Get FRESH crypto price from Binance (no cache). For latency arb detection.
+
+    Research: Kalshi crypto markets lag spot by 30s-5min. If spot moved significantly
+    since the Kalshi market price was set, we have a latency edge.
+    """
+    symbol = {"btc": "BTCUSDT", "eth": "ETHUSDT", "sol": "SOLUSDT"}.get(asset.lower(), "BTCUSDT")
+    try:
+        resp = requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}", timeout=3)
+        return float(resp.json()["price"])
+    except Exception:
+        return 0.0
 
 
 def get_fear_greed_index() -> dict:
@@ -1995,11 +2033,20 @@ def _heuristic_crypto(market: MarketInfo, context: dict = None) -> tuple:
     # Detect asset
     asset = "btc" if "BTC" in ticker else ("eth" if "ETH" in ticker else "sol")
 
-    # Get current price from context
+    # Get current price — prefer FRESH Binance price for latency arb detection
+    # Research: Kalshi crypto markets lag spot by 30s-5min
+    realtime_price = get_realtime_crypto_price(asset)
     prices = (context or {}).get("crypto_prices", {})
-    current_price = prices.get(asset, 0)
+    cached_price = prices.get(asset, 0)
+    current_price = realtime_price or cached_price
     if not current_price:
         return market_prob, "low", ["No price data"], ["No crypto price"]
+    # Detect spot-vs-cached divergence (latency arb signal)
+    if realtime_price and cached_price and cached_price > 0:
+        price_drift_pct = abs(realtime_price - cached_price) / cached_price * 100
+        if price_drift_pct > 0.5:
+            reasoning_parts.append(f"LATENCY: spot drifted {price_drift_pct:.2f}% since cache")
+            key_factors.append(f"spot_drift={price_drift_pct:.2f}%")
 
     # Extract strike from subtitle (e.g., "$88,750 or above")
     strike = None
@@ -2269,6 +2316,32 @@ LEAGUE_BLACKLIST = {"NBA", "NHL"}  # Grok rec: ~50% WR = coin-flip after fees �
 def make_trade_decision(market: MarketInfo, forecast: ForecastResult, critic: CriticResult,
                         balance: float) -> TradeDecision:
     """Compare probability vs market price and decide. Uses split thresholds (v3 data-driven)."""
+
+    # ── TAIL-END STRATEGY: near-certain outcomes close to resolution ──
+    # Research (Becker): contracts at 97-99¢ have ~94% accuracy hours before resolution.
+    # Buy NO at 1-3¢ when event is near-certain YES (or vice versa) for 1-3% safe return.
+    try:
+        dte_hours = market.days_to_expiry * 24
+        if dte_hours < 4 and market.volume > 100:
+            # Near-certain YES: buy YES at 97-99¢ (NO is 1-3¢)
+            if market.yes_price >= 97 and forecast.probability > 0.95:
+                safe_contracts = max(1, min(10, int(balance * 0.03 * 100 / market.yes_price)))
+                return TradeDecision(
+                    action="BUY_YES", edge=forecast.probability - market.yes_price / 100,
+                    kelly_size=0.03, contracts=safe_contracts, price_cents=market.yes_price,
+                    reason=f"TAIL-END: YES@{market.yes_price}¢, {dte_hours:.1f}h to settle, prob={forecast.probability:.0%}",
+                    forecast=forecast, critic=critic)
+            # Near-certain NO: buy NO at 1-3¢ (YES is 97-99¢)
+            if market.no_price <= 3 and market.yes_price >= 97 and forecast.probability < 0.05:
+                safe_contracts = max(1, min(10, int(balance * 0.03 * 100 / max(1, market.no_price))))
+                return TradeDecision(
+                    action="BUY_NO", edge=(1 - forecast.probability) - market.no_price / 100,
+                    kelly_size=0.03, contracts=safe_contracts, price_cents=market.no_price,
+                    reason=f"TAIL-END: NO@{market.no_price}¢, {dte_hours:.1f}h to settle, prob_no={1-forecast.probability:.0%}",
+                    forecast=forecast, critic=critic)
+    except Exception:
+        pass
+
     # ── League blacklist: NBA/NHL are near-efficient (50-52% WR, fee-eroded) ──
     ticker_up = market.ticker.upper()
     for league in LEAGUE_BLACKLIST:
@@ -2441,6 +2514,19 @@ def make_trade_decision(market: MarketInfo, forecast: ForecastResult, critic: Cr
             kelly_frac *= time_scale
     except Exception:
         pass
+
+    # OBI confirmation signal (research: OBI > 0.65 predicts direction with 58% accuracy)
+    # Skip expensive API call in paper mode for most trades — only check for large positions
+    if kelly_frac > 0.03 and not DRY_RUN:
+        obi = get_orderbook_imbalance(market.ticker)
+        # For BUY_YES: positive OBI = buying pressure = confirms our direction
+        # For BUY_NO: negative OBI = selling pressure = confirms our direction
+        obi_confirms = (action == "BUY_YES" and obi > 0) or (action == "BUY_NO" and obi < 0)
+        obi_contradicts = (action == "BUY_YES" and obi < -0.5) or (action == "BUY_NO" and obi > 0.5)
+        if obi_contradicts:
+            kelly_frac *= 0.5  # Halve position when orderbook strongly disagrees
+        elif obi_confirms and abs(obi) > 0.65:
+            kelly_frac *= 1.2  # Boost 20% when strong OBI confirmation
 
     bet_cents = int(balance * kelly_frac * 100)
     cost_per = max(1, side_price)

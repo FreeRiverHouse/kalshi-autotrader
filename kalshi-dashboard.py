@@ -60,7 +60,10 @@ def get_config_params() -> dict:
     src = AUTOTRADER.read_text()
     for key in ["MIN_EDGE_BUY_NO", "MIN_EDGE_BUY_YES", "KELLY_FRACTION",
                 "MAX_BET_CENTS", "CALIBRATION_FACTOR", "MAX_POSITIONS",
-                "MAX_PRICE_CENTS", "VIRTUAL_BALANCE"]:
+                "MAX_PRICE_CENTS", "VIRTUAL_BALANCE", "MAX_NO_PRICE_CENTS",
+                "MULTIGAME_MIN_EDGE_BUY_NO", "MULTIGAME_MAX_NO_PRICE_CENTS",
+                "MAX_POSITION_PCT", "MAX_EDGE_CAP_YES", "MAX_EDGE_CAP_NO",
+                "DAILY_LOSS_LIMIT_PCT"]:
         m = re.search(rf'^{key}\s*=\s*([^\s#\n]+)', src, re.MULTILINE)
         if m:
             params[key] = m.group(1)
@@ -738,6 +741,7 @@ body::after{
     <div class="card cc"><div class="ct">Attività per Ora del Giorno (cicli)</div><div id="ch-hour-cycles"></div></div>
     <div class="card cc"><div class="ct">Trade Piazzati per Ora</div><div id="ch-hour-trades"></div></div>
   </div>
+  <div class="card cc"><div class="ct">Win Rate per Ora (PST) — identifica le ore migliori</div><div id="ch-hour-wr"></div></div>
 
   <!-- RISK METRICS + STREAKS -->
   <div class="sec">Risk Metrics &amp; Streaks</div>
@@ -933,9 +937,11 @@ function dash(){
     paramHistory:[],
     timeRange:'7d',
 
-    // GOLDEN CONFIG for comparison (selective Grok 4.20 strategy)
-    golden:{MIN_EDGE_BUY_NO:'0.03',MIN_EDGE_BUY_YES:'0.08',KELLY_FRACTION:'0.15',
-            MAX_BET_CENTS:'100',MAX_POSITIONS:'30',DAILY_LOSS_LIMIT_CENTS:'—'},
+    // GOLDEN CONFIG for comparison (Becker research + 8220 trade data-driven)
+    golden:{MIN_EDGE_BUY_NO:'0.10',MIN_EDGE_BUY_YES:'0.03',KELLY_FRACTION:'0.15',
+            MAX_BET_CENTS:'100',MAX_POSITIONS:'30',MAX_NO_PRICE_CENTS:'69',
+            MAX_POSITION_PCT:'0.05',MAX_EDGE_CAP_YES:'0.08',MAX_EDGE_CAP_NO:'0.20',
+            MULTIGAME_MIN_EDGE_BUY_NO:'0.05',DAILY_LOSS_LIMIT_PCT:'0.03'},
 
     get lastActText(){
       if(!this.trades||!this.trades.length) return '';
@@ -1258,6 +1264,28 @@ function dash(){
             }}},
           });
         }
+      }
+
+      /* Hourly Win Rate (dedicated chart) */
+      if(hourly&&hourly.length&&hourly.some(h=>h.trades>0)){
+        this.mk('ch-hour-wr',{...b,
+          chart:{...b.chart,type:'bar',height:200},
+          series:[{name:'Win Rate %',data:hourly.map(h=>h.win_rate||0)}],
+          xaxis:{...b.xaxis,categories:hourly.map(h=>h.hour+':00')},
+          colors:hourly.map(h=>{
+            const wr=h.win_rate||0;
+            if(wr>=80) return '#10b981';
+            if(wr>=60) return '#f59e0b';
+            return '#ef4444';
+          }),
+          plotOptions:{bar:{borderRadius:3,distributed:true}},
+          legend:{show:false},
+          yaxis:{...b.yaxis,min:0,max:100,labels:{formatter:v=>v+'%'}},
+          tooltip:{y:{formatter:(v,{dataPointIndex:i})=>{
+            const h=hourly[i];
+            return v.toFixed(1)+'% WR ('+h.trades+' trades, '+h.won+' won)';
+          }}},
+        });
       }
 
       /* Forecast Calibration */
