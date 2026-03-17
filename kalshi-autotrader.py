@@ -3725,10 +3725,20 @@ def run_cycle(dry_run: bool = True, max_markets: int = 30, max_trades: int = 10)
             markets = crypto_markets
         # If no crypto markets available, keep all (holiday skip will filter later)
 
-    # Score and rank
+    # Score and rank with diversity: max 3 markets per ticker prefix (e.g., KXBTCD-26MAR1703)
     scored = [(m, score_market(m)) for m in markets]
     scored.sort(key=lambda x: x[1], reverse=True)
-    top_markets = scored[:max_markets]
+    top_markets = []
+    prefix_counts = {}
+    MAX_PER_PREFIX = 3  # Prevent 30 identical BTC-at-different-targets dominating
+    for m, s in scored:
+        # Extract prefix: everything before the target price (e.g., KXBTCD-26MAR1703-T → KXBTCD-26MAR1703)
+        prefix = re.sub(r'-T[\d.]+$', '', m.ticker)
+        prefix_counts[prefix] = prefix_counts.get(prefix, 0) + 1
+        if prefix_counts[prefix] <= MAX_PER_PREFIX:
+            top_markets.append((m, s))
+        if len(top_markets) >= max_markets:
+            break
 
     print(f"\n🎯 TOP {len(top_markets)} MARKETS:")
     print("-" * 70)
