@@ -23,8 +23,8 @@ ADAPT_WINDOW  = 50    # look at last N settled trades for metrics
 
 # Clamp ranges (safety rails — never go outside these)
 CLAMPS = {
-    "MIN_EDGE_BUY_YES":      (0.05,  0.15),   # 5% – 15%
-    "MIN_EDGE_BUY_NO":       (0.02,  0.08),   # 2% – 8%
+    "MIN_EDGE_BUY_YES":      (0.02,  0.10),   # 2% – 10% (DATA: 3-5% = 98% WR sweet spot)
+    "MIN_EDGE_BUY_NO":       (0.08,  0.15),   # 8% – 15% (DATA: <10% = coin flip, 10%+ = 85.9% WR)
     "CALIBRATION_FACTOR_YES": (0.25,  0.60),
     "CALIBRATION_FACTOR_NO":  (0.50,  0.85),
     "KELLY_FRACTION":         (0.10,  0.40),
@@ -100,12 +100,12 @@ def compute_adaptive_params(current: dict) -> dict:
     new_min_edge_yes = current["MIN_EDGE_BUY_YES"]
     yes_reason = "no change"
     if yes_total >= 5:
-        if yes_wr < 35:
-            new_min_edge_yes += 0.01   # tighten: WR too low
-            yes_reason = f"WR {yes_wr:.0f}% < 35% → +1%"
-        elif yes_wr > 55:
-            new_min_edge_yes -= 0.005  # loosen: WR is great
-            yes_reason = f"WR {yes_wr:.0f}% > 55% → -0.5%"
+        if yes_wr < 50:
+            new_min_edge_yes += 0.005  # tighten slightly (YES sweet spot is low edge)
+            yes_reason = f"WR {yes_wr:.0f}% < 50% → +0.5%"
+        elif yes_wr > 80:
+            new_min_edge_yes -= 0.005  # loosen: can accept even lower edge
+            yes_reason = f"WR {yes_wr:.0f}% > 80% → -0.5%"
         else:
             yes_reason = f"WR {yes_wr:.0f}% in range"
     new_min_edge_yes = _clamp("MIN_EDGE_BUY_YES", new_min_edge_yes)
@@ -114,12 +114,12 @@ def compute_adaptive_params(current: dict) -> dict:
     new_min_edge_no = current["MIN_EDGE_BUY_NO"]
     no_reason = "no change"
     if no_total >= 5:
-        if no_wr < 55:
-            new_min_edge_no += 0.005   # tighten
-            no_reason = f"WR {no_wr:.0f}% < 55% → +0.5%"
-        elif no_wr > 75:
-            new_min_edge_no -= 0.003   # loosen: performing well
-            no_reason = f"WR {no_wr:.0f}% > 75% → -0.3%"
+        if no_wr < 70:
+            new_min_edge_no += 0.01    # tighten: 10% base means we need >70% WR
+            no_reason = f"WR {no_wr:.0f}% < 70% → +1%"
+        elif no_wr > 85:
+            new_min_edge_no -= 0.005   # loosen: strong performance, can accept slightly lower edge
+            no_reason = f"WR {no_wr:.0f}% > 85% → -0.5%"
         else:
             no_reason = f"WR {no_wr:.0f}% in range"
     new_min_edge_no = _clamp("MIN_EDGE_BUY_NO", new_min_edge_no)

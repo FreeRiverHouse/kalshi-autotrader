@@ -170,14 +170,14 @@ VIRTUAL_BALANCE = 100.0  # $100 virtual balance — simulate a real $100 deposit
 
 # ── Trading parameters (2026-03-16 SELECTIVE STRATEGY) ──
 # Focus on quality over quantity: only trade where Grok 4.20 finds real edge
-MIN_EDGE_BUY_NO  = 0.03   # 3% min edge for BUY_NO (calibration shows 5% calc = 40%+ real edge)
-MIN_EDGE_BUY_YES = 0.08   # 8% min edge for BUY_YES (YES historically weak, need big edge)
+MIN_EDGE_BUY_NO  = 0.10   # 10% min edge for BUY_NO — DATA: <10% edge = 55% WR (coin flip), 10%+ = 85.9% WR
+MIN_EDGE_BUY_YES = 0.03   # 3% min edge for BUY_YES — DATA: 3-5% edge = 98.2% WR (sweet spot)
 CALIBRATION_FACTOR = 0.65  # legacy: kept for dynamic calibration baseline
 CALIBRATION_FACTOR_YES = 0.25  # YES: shrink even harder (Grok: 0.25-0.30)
 CALIBRATION_FACTOR_NO  = 0.62  # NO: let breathe a bit more (Grok: 0.60-0.65)
 
 # ── MULTIGAME special overrides (87.5% WR — golden goose) ──
-MULTIGAME_MIN_EDGE_BUY_NO  = 0.03   # 3% for multigame (strong WR, can be looser)
+MULTIGAME_MIN_EDGE_BUY_NO  = 0.05   # 5% for multigame (87.5% WR — can be looser than 10% general)
 MULTIGAME_MAX_NO_PRICE_CENTS = 82   # Raised 80→82¢ (Grok rec: "can go to 82-85")
 
 
@@ -236,9 +236,9 @@ def get_calibration_factor(trade_history: list | None = None) -> float:
     return CALIBRATION_FACTOR  # Shrink LLM/heuristic probs toward 50% to correct overconfidence
                             # (Grok: predicted 71.5% → actual 46.2%, ratio ~0.65)
 MIN_EDGE = 0.03            # 3% global minimum edge (was 0 — allowed zero-edge data-collection trades)
-MAX_EDGE_CAP_YES = 0.06   # YES >6% edge = almost certainly miscalibrated (28.6% WR at >10%)
-MAX_EDGE_CAP_NO  = 0.10   # NO works well even at high edge
-MAX_POSITION_PCT = 0.10   # 10% per position — moderate sizing
+MAX_EDGE_CAP_YES = 0.08   # YES >8% edge = overconfidence (DATA: 10-15% edge = 32% WR, but 3-5% = 98% WR)
+MAX_EDGE_CAP_NO  = 0.20   # NO works great at high edge (DATA: 10-15% = 85.9% WR) — let it breathe
+MAX_POSITION_PCT = 0.05   # 5% per position (research: weather bot cap, survived longest)
 KELLY_FRACTION = 0.15      # Conservative sizing in paper mode
 MIN_BET_CENTS = 5
 MAX_BET_CENTS = 100        # $1 max per trade — micro-betting on $100 bankroll
@@ -258,7 +258,7 @@ def dynamic_max_positions(balance: float) -> int:
 
 # ── Risk/Reward filters (TRADE-003: fix loss 2x > win asymmetry) ──
 # BUY_NO at >50¢ means you risk more than you win. Require bigger edge to justify.
-MAX_NO_PRICE_CENTS = 75     # Raised to 75 (Grok rec) — multigame uses MULTIGAME_MAX_NO_PRICE_CENTS=80
+MAX_NO_PRICE_CENTS = 69     # DATA: 50-69¢ = 84.7% WR +$8833, 70-84¢ = 73.8% WR -$2 (negative P&L despite high WR)
 NO_PRICE_EDGE_SCALE = True  # Scale min edge up with BUY_NO price
 # If NO price is 50-65¢, require edge >= 3% + 0.1% per cent above 50
 # e.g., 55¢ → 3.5% min edge, 60¢ → 4% min edge, 65¢ → 4.5%
@@ -288,10 +288,17 @@ MIN_DAYS_TO_EXPIRY = 0.02  # ~30 minutes (slightly raised from 0.005)
 MIN_PRICE_CENTS = 5
 MAX_PRICE_CENTS = 95   # Allow full price range
 
+# ── Category blacklist (research: Becker 72M trades analysis) ──
+# Finance = 0.17pp edge (near-efficient), waste of bankroll
+CATEGORY_BLACKLIST = {"economy", "finance"}
+# Priority categories (highest structural edge from retail bias):
+# entertainment=4.79pp, world_events=3.66pp, crypto=2.69pp, sports=2.23pp
+
 # ── Circuit breaker / daily loss ──
 CIRCUIT_BREAKER_THRESHOLD = 5  # Pause after N consecutive losses
 CIRCUIT_BREAKER_COOLDOWN_HOURS = 4
-DAILY_LOSS_LIMIT_CENTS = 500   # $5 daily loss limit (golden config — was $15, too loose)
+DAILY_LOSS_LIMIT_CENTS = 500   # $5 fallback — overridden by dynamic 3% of bankroll below
+DAILY_LOSS_LIMIT_PCT = 0.03    # 3% of bankroll = dynamic daily loss limit (research: Becker framework)
 
 # ── Weather markets (v2's T422) ──
 WEATHER_ENABLED = os.getenv("WEATHER_ENABLED", "false").lower() in ("true", "1", "yes")
@@ -1835,6 +1842,40 @@ def classify_market_type(market: MarketInfo) -> str:
     return "generic"
 
 
+def derive_category(market: MarketInfo) -> str:
+    """Derive trading category from ticker/title. Used for analytics — never empty."""
+    ticker = market.ticker.upper()
+    title = market.title.lower()
+    # Crypto
+    if any(x in ticker for x in ("KXBTC", "KXETH", "KXSOL", "CRYPTO", "BITCOIN", "ETHER")):
+        return "crypto"
+    if any(x in title for x in ("bitcoin", "btc", "ethereum", "eth", "solana", "crypto")):
+        return "crypto"
+    # Weather
+    if any(x in ticker for x in ("KXHIGH", "KXLOW", "TEMP", "WEATHER")):
+        return "weather"
+    # Sports — check specific leagues
+    for league in ("NBA", "NFL", "MLB", "NHL", "CBB", "NCAAB", "SOCCER", "MLS", "WNBA", "UFC", "MMA"):
+        if league in ticker or league.lower() in title:
+            return f"sports-{league.lower()}"
+    # Esports / multigame
+    if any(x in ticker for x in ("MULTIGAME", "ESPORT", "COMBO")):
+        return "sports-multigame"
+    # Generic sports detection
+    if any(x in title for x in ("win", "beat", "score", "points", "game", "match", "team")):
+        return "sports-other"
+    # Politics / economy
+    if any(x in ticker for x in ("PRES", "ELEC", "GOV", "SEN", "CONGRESS")):
+        return "politics"
+    if any(x in title for x in ("president", "election", "senate", "governor", "congress", "trump", "biden")):
+        return "politics"
+    if any(x in ticker for x in ("FED", "CPI", "GDP", "JOBS", "RATE", "INFL")):
+        return "economy"
+    if any(x in title for x in ("fed ", "inflation", "cpi", "gdp", "unemployment", "interest rate")):
+        return "economy"
+    return "other"
+
+
 def detect_sport(market: MarketInfo) -> str:
     ticker = market.ticker.upper()
     title = market.title.lower()
@@ -2257,12 +2298,13 @@ def make_trade_decision(market: MarketInfo, forecast: ForecastResult, critic: Cr
     market_prob = market.market_prob
     edge_yes = final_prob - market_prob
     
-    # Subtract round-trip fees/slippage (Grok review #2: edge overstated by 1-3%)
-    ROUND_TRIP_FEE = 0.007  # ~0.7% taker fees on Kalshi
+    # Subtract fees/slippage — Kalshi charges ZERO for limit orders (makers)
+    # Only account for slippage estimate, not taker fees (we always use limit orders)
+    MAKER_SLIPPAGE = 0.002  # ~0.2% slippage estimate for limit fills (was 0.7% taker fee)
     if edge_yes > 0:
-        edge_yes -= ROUND_TRIP_FEE
+        edge_yes -= MAKER_SLIPPAGE
     elif edge_yes < 0:
-        edge_yes += ROUND_TRIP_FEE  # For BUY_NO, edge_yes is negative
+        edge_yes += MAKER_SLIPPAGE  # For BUY_NO, edge_yes is negative
 
     # Dynamic edge minimum based on liquidity (paper mode: skip bump — collecting data on all markets)
     # In live mode: Low volume (<1k contracts) → add 1% to min edge. Very low (<500) → add 2%.
@@ -2282,6 +2324,13 @@ def make_trade_decision(market: MarketInfo, forecast: ForecastResult, critic: Cr
             return TradeDecision(action="SKIP", edge=edge_yes, kelly_size=0, contracts=0,
                                 price_cents=0, reason=f"BUY_NO edge {abs(edge_yes):.1%} < {dyn_min_no:.0%} (vol={market.volume})",
                                 forecast=forecast, critic=critic)
+
+    # ── Category blacklist (research: finance/economy = near-zero structural edge) ──
+    market_category = derive_category(market)
+    if market_category in CATEGORY_BLACKLIST:
+        return TradeDecision(action="SKIP", edge=edge_yes, kelly_size=0, contracts=0, price_cents=0,
+                            reason=f"Category '{market_category}' blacklisted (near-zero structural edge)",
+                            forecast=forecast, critic=critic)
 
     if not critic.should_trade:
         return TradeDecision(action="SKIP", edge=edge_yes, kelly_size=0, contracts=0, price_cents=0,
@@ -2331,7 +2380,7 @@ def make_trade_decision(market: MarketInfo, forecast: ForecastResult, critic: Cr
 
     # 2. Scaled edge requirement for expensive BUY_NO (re-enabled: data shows bad R/R at high prices)
     if action == "BUY_NO" and NO_PRICE_EDGE_SCALE and side_price > 50:
-        scaled_min_edge = 0.03 + (side_price - 50) * 0.001  # 50¢→3%, 55¢→3.5%, 60¢→4%, 65¢→4.5%
+        scaled_min_edge = 0.10 + (side_price - 50) * 0.003  # 50¢→10%, 55¢→11.5%, 60¢→13%, 65¢→14.5%
         if edge < scaled_min_edge:
             return TradeDecision(action="SKIP", edge=edge, kelly_size=0, contracts=0, price_cents=side_price,
                                 reason=f"BUY_NO {side_price}¢ needs edge≥{scaled_min_edge:.1%}, got {edge:.1%}",
@@ -2376,6 +2425,22 @@ def make_trade_decision(market: MarketInfo, forecast: ForecastResult, critic: Cr
         kelly_frac *= min(1.2, 1.0 / vol_factor)  # slightly more aggressive in low vol
     if kelly_frac <= 0:
         kelly_frac = 0.02  # Minimum 2% bet even with 0 edge — collect data mode
+
+    # Sqrt time scaling: reduce position size as settlement approaches (gamma risk)
+    # Research: position_scale = sqrt(remaining_time / initial_time)
+    # Short DTE = high gamma = reduce size to manage risk
+    try:
+        dte_hours = market.days_to_expiry * 24
+        if dte_hours < 2:
+            # Very close to settlement — scale down aggressively
+            time_scale = max(0.3, math.sqrt(dte_hours / 2))
+            kelly_frac *= time_scale
+        elif dte_hours < 12:
+            # Approaching settlement — moderate scaling
+            time_scale = max(0.5, math.sqrt(dte_hours / 12))
+            kelly_frac *= time_scale
+    except Exception:
+        pass
 
     bet_cents = int(balance * kelly_frac * 100)
     cost_per = max(1, side_price)
@@ -2739,7 +2804,15 @@ def check_daily_loss_limit() -> tuple:
     net_pnl = won - spent
     pnl = {"net_pnl_cents": net_pnl, "trades_today": trades, "spent": spent, "won": won}
 
-    if net_pnl < -DAILY_LOSS_LIMIT_CENTS:
+    # Dynamic daily loss limit: 3% of bankroll or $5, whichever is larger
+    try:
+        paper_state = load_paper_state()
+        bankroll_cents = paper_state.get("current_balance_cents", 20000)
+        dynamic_limit = max(DAILY_LOSS_LIMIT_CENTS, int(bankroll_cents * DAILY_LOSS_LIMIT_PCT))
+    except Exception:
+        dynamic_limit = DAILY_LOSS_LIMIT_CENTS
+    if net_pnl < -dynamic_limit:
+        pnl["dynamic_limit_cents"] = dynamic_limit
         return True, pnl
 
     # Check pause file from earlier today
@@ -2915,7 +2988,8 @@ def save_paper_state(state: dict):
 
 
 def paper_trade_open(state: dict, ticker: str, action: str, price_cents: int, contracts: int,
-                     title: str = "", edge: float = 0.0, expiry: str = ""):
+                     title: str = "", edge: float = 0.0, expiry: str = "",
+                     forecast_prob: float = None, category: str = ""):
     """Record a new paper trade: deduct cost from bankroll, add to positions."""
     # Check max positions limit — paper mode allows 50 for data collection
     open_positions = [p for p in state.get("positions", []) if p.get("status") == "open"]
@@ -2944,6 +3018,8 @@ def paper_trade_open(state: dict, ticker: str, action: str, price_cents: int, co
         "edge": round(edge, 4),
         "expiry": expiry,
         "status": "open",
+        "forecast_prob": round(forecast_prob, 4) if forecast_prob is not None else None,
+        "category": category,
     }
     state["positions"].append(position)
     state["stats"]["total_trades"] = state["stats"].get("total_trades", 0) + 1
@@ -2991,6 +3067,21 @@ def paper_trade_settle(state: dict, ticker: str, won: bool):
                 state["stats"]["gross_loss_cents"] = state["stats"].get("gross_loss_cents", 0) + cost
                 pos["pnl_cents"] = -cost
 
+            # Calibration error tracking: how far was the forecast from reality?
+            forecast_prob = pos.get("forecast_prob")
+            if forecast_prob is not None:
+                actual = 1.0 if won else 0.0
+                # For BUY_NO, forecast_prob is P(YES). If we bought NO and won, actual YES = 0.
+                # If we bought NO and lost, actual YES = 1.
+                if pos.get("action") == "BUY_NO":
+                    actual = 0.0 if won else 1.0
+                pos["calibration_error"] = round(abs(forecast_prob - actual), 4)
+                # Track running calibration stats
+                cal_stats = state.setdefault("calibration_stats", {"sum_error": 0, "count": 0})
+                cal_stats["sum_error"] += pos["calibration_error"]
+                cal_stats["count"] += 1
+                cal_stats["avg_error"] = round(cal_stats["sum_error"] / cal_stats["count"], 4)
+
             # Update trade history
             for h in reversed(state.get("trade_history", [])):
                 if h.get("ticker") == ticker and h.get("status") == "open":
@@ -3015,17 +3106,25 @@ def paper_trade_settle(state: dict, ticker: str, won: bool):
 
 def log_trade(market: MarketInfo, decision: TradeDecision, order_result: dict, dry_run: bool):
     """Log trade to JSONL files."""
+    derived_cat = derive_category(market)
     for log_path in [TRADE_LOG_FILE, LEGACY_TRADE_LOG, V3_TRADE_LOG]:
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        now = datetime.now(timezone.utc)
         entry = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": now.isoformat(),
+            "hour_utc": now.hour,
+            "hour_pst": (now.hour - 8) % 24,
+            "day_of_week": now.strftime("%A"),
             "dry_run": dry_run,
             "ticker": market.ticker,
             "title": market.title[:100],
-            "category": market.category,
+            "category": derived_cat,
+            "market_type": classify_market_type(market),
+            "sport": detect_sport(market) if "sport" in derived_cat else None,
             "market_price_yes": market.yes_price,
             "market_price_no": market.no_price,
             "volume": market.volume,
+            "open_interest": market.open_interest,
             "expiry": market.expiry,
             "days_to_expiry": round(market.days_to_expiry, 2),
             "action": decision.action,
@@ -3090,7 +3189,7 @@ def log_decision(market: MarketInfo, decision: TradeDecision, outcome: str):
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "ticker": market.ticker,
         "title": market.title[:80],
-        "category": market.category,
+        "category": derive_category(market),
         "outcome": outcome,
         "action": decision.action,
         "edge": round(decision.edge, 4),
@@ -3632,7 +3731,9 @@ def run_cycle(dry_run: bool = True, max_markets: int = 30, max_trades: int = 10)
                 paper_trade_open(paper_state, market.ticker, decision.action,
                                  decision.price_cents, decision.contracts,
                                  title=market.title, edge=decision.edge,
-                                 expiry=market.expiry or "")
+                                 expiry=market.expiry or "",
+                                 forecast_prob=decision.forecast.probability if decision.forecast else None,
+                                 category=derive_category(market))
                 save_paper_state(paper_state)  # FIX: persist to disk every trade
                 print(f"   📊 Paper bankroll: ${paper_state['current_balance_cents']/100:.2f}")
             except Exception as e:
@@ -3681,7 +3782,9 @@ def run_cycle(dry_run: bool = True, max_markets: int = 30, max_trades: int = 10)
                         try:
                             ps = load_paper_state()
                             paper_trade_open(ps, wm.ticker, wd.action, wo["price"], wd.contracts,
-                                             title=wm.title, edge=wo["edge"], expiry=wm.expiry or "")
+                                             title=wm.title, edge=wo["edge"], expiry=wm.expiry or "",
+                                             forecast_prob=wd.forecast.probability if wd.forecast else None,
+                                             category=derive_category(wm))
                         except Exception:
                             pass
                     trades_executed += 1
