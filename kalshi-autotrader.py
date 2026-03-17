@@ -301,6 +301,16 @@ MIN_DAYS_TO_EXPIRY = 0.02  # ~30 minutes (slightly raised from 0.005)
 MIN_PRICE_CENTS = 5
 MAX_PRICE_CENTS = 95   # Allow full price range
 
+# ── Favourite-longshot bias (Whelan research: cheap YES = systematically overpriced) ──
+# People overbet longshots → YES < 20¢ contracts lose ~74% of the time.
+# Strategy: buy NO when YES is cheap (strong structural edge, no forecasting needed).
+LONGSHOT_BIAS_ENABLED = True
+LONGSHOT_YES_PRICE_MAX = 20   # YES must be ≤ 20¢ (NO ≥ 80¢)
+LONGSHOT_MIN_VOLUME = 100     # Require real volume (no ghost market longshots)
+LONGSHOT_MIN_OI = 10          # Minimum open interest (someone else valued this market)
+LONGSHOT_KELLY_FRAC = 0.03    # Conservative sizing: 3% Kelly (structural edge, not forecast-based)
+LONGSHOT_MAX_DTE_DAYS = 7     # Only short-dated (bias is strongest near resolution)
+
 # ── Category blacklist (research: Becker 72M trades analysis) ──
 # Finance = 0.17pp edge (near-efficient), waste of bankroll
 CATEGORY_BLACKLIST = {"economy", "finance"}
@@ -2411,6 +2421,39 @@ def make_trade_decision(market: MarketInfo, forecast: ForecastResult, critic: Cr
                     forecast=forecast, critic=critic)
     except Exception:
         pass
+
+    # ── FAVOURITE-LONGSHOT BIAS: buy NO when YES is cheap (structural edge) ──
+    # Research (Whelan): cheap contracts (YES < 20¢) lose ~74% of the time.
+    # This is a market microstructure edge — retail overbets longshots.
+    # No forecasting needed: the bias IS the edge.
+    if LONGSHOT_BIAS_ENABLED:
+        try:
+            _ticker_check = market.ticker.upper()
+            _is_blacklisted_league = any(lg in _ticker_check for lg in ("NBA", "NHL"))
+            if (not _is_blacklisted_league
+                    and market.yes_price <= LONGSHOT_YES_PRICE_MAX
+                    and market.volume >= LONGSHOT_MIN_VOLUME
+                    and market.open_interest >= LONGSHOT_MIN_OI
+                    and market.days_to_expiry <= LONGSHOT_MAX_DTE_DAYS):
+                no_price = market.no_price or (100 - market.yes_price)
+                # Apply paper spread
+                ls_spread = 0
+                if DRY_RUN and market.volume < THIN_MARKET_VOLUME:
+                    ls_spread = PAPER_SPREAD_CENTS if market.volume == 0 else max(1, PAPER_SPREAD_CENTS // 2)
+                no_price_adj = no_price + ls_spread
+                # Structural edge: expected value = 0.74 * (100 - no_price_adj) - 0.26 * no_price_adj
+                structural_edge = 0.74 - no_price_adj / 100  # simplified: 74% WR - cost/100
+                if structural_edge > 0.02:  # at least 2% structural edge after cost
+                    ls_contracts = max(1, min(5, int(balance * LONGSHOT_KELLY_FRAC * 100 / max(1, no_price_adj))))
+                    return TradeDecision(
+                        action="BUY_NO", edge=structural_edge,
+                        kelly_size=LONGSHOT_KELLY_FRAC, contracts=ls_contracts,
+                        price_cents=no_price_adj,
+                        reason=f"LONGSHOT-BIAS: YES@{market.yes_price}¢ overpriced (74% WR structural), "
+                               f"NO@{no_price_adj}¢, vol={market.volume}, DTE={market.days_to_expiry:.1f}d",
+                        forecast=forecast, critic=critic)
+        except Exception:
+            pass
 
     # ── League blacklist: NBA/NHL are near-efficient (50-52% WR, fee-eroded) ──
     ticker_up = market.ticker.upper()

@@ -64,7 +64,8 @@ def get_config_params() -> dict:
                 "MULTIGAME_MIN_EDGE_BUY_NO", "MULTIGAME_MAX_NO_PRICE_CENTS",
                 "MAX_POSITION_PCT", "MAX_EDGE_CAP_YES", "MAX_EDGE_CAP_NO",
                 "DAILY_LOSS_LIMIT_PCT", "MIN_VOLUME", "MIN_LIQUIDITY",
-                "PAPER_SPREAD_CENTS", "PAPER_MIN_VOLUME_NON_CRYPTO"]:
+                "PAPER_SPREAD_CENTS", "PAPER_MIN_VOLUME_NON_CRYPTO",
+                "LONGSHOT_BIAS_ENABLED", "LONGSHOT_YES_PRICE_MAX", "LONGSHOT_MIN_VOLUME"]:
         m = re.search(rf'^{key}\s*=\s*([^\s#\n]+)', src, re.MULTILINE)
         if m:
             params[key] = m.group(1)
@@ -944,7 +945,8 @@ function dash(){
             MAX_POSITION_PCT:'0.05',MAX_EDGE_CAP_YES:'0.08',MAX_EDGE_CAP_NO:'0.20',
             MULTIGAME_MIN_EDGE_BUY_NO:'0.05',DAILY_LOSS_LIMIT_PCT:'0.03',
             MIN_VOLUME:'0',MIN_LIQUIDITY:'0',
-            PAPER_SPREAD_CENTS:'3',PAPER_MIN_VOLUME_NON_CRYPTO:'50'},
+            PAPER_SPREAD_CENTS:'3',PAPER_MIN_VOLUME_NON_CRYPTO:'50',
+            LONGSHOT_BIAS_ENABLED:'True',LONGSHOT_YES_PRICE_MAX:'20',LONGSHOT_MIN_VOLUME:'100'},
 
     get lastActText(){
       if(!this.trades||!this.trades.length) return '';
