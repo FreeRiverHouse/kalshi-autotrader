@@ -3804,12 +3804,24 @@ def run_cycle(dry_run: bool = True, max_markets: int = 30, max_trades: int = 10)
     top_markets = []
     prefix_counts = {}
     MAX_PER_PREFIX = 3  # Prevent 30 identical BTC-at-different-targets dominating
+    MAX_CRYPTO_TOTAL = 9  # Max 9 crypto markets total (3 per asset) → leaves 21 slots for non-crypto
+    crypto_count = 0
     for m, s in scored:
-        # Extract prefix: everything before the target price (e.g., KXBTCD-26MAR1703-T → KXBTCD-26MAR1703)
-        prefix = re.sub(r'-T[\d.]+$', '', m.ticker)
+        # Extract prefix: for crypto, use ASSET only (KXBTCD) so all BTC hourly share 3 slots
+        # For non-crypto, use ticker minus target (e.g., KXNBA... → full prefix for game-level diversity)
+        _is_crypto_mkt = any(x in m.ticker.upper() for x in ("KXBTC", "KXETH", "KXSOL"))
+        if _is_crypto_mkt:
+            prefix = re.sub(r'D-.*', 'D', m.ticker)  # KXBTCD-26MAR1703-T81749.99 → KXBTCD
+        else:
+            prefix = re.sub(r'-T[\d.]+$', '', m.ticker)
         prefix_counts[prefix] = prefix_counts.get(prefix, 0) + 1
-        if prefix_counts[prefix] <= MAX_PER_PREFIX:
-            top_markets.append((m, s))
+        if prefix_counts[prefix] > MAX_PER_PREFIX:
+            continue
+        if _is_crypto_mkt and crypto_count >= MAX_CRYPTO_TOTAL:
+            continue
+        if _is_crypto_mkt:
+            crypto_count += 1
+        top_markets.append((m, s))
         if len(top_markets) >= max_markets:
             break
 
