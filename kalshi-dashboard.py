@@ -63,7 +63,7 @@ def get_config_params() -> dict:
                 "MAX_PRICE_CENTS", "VIRTUAL_BALANCE", "MAX_NO_PRICE_CENTS",
                 "MULTIGAME_MIN_EDGE_BUY_NO", "MULTIGAME_MAX_NO_PRICE_CENTS",
                 "MAX_POSITION_PCT", "MAX_EDGE_CAP_YES", "MAX_EDGE_CAP_NO",
-                "DAILY_LOSS_LIMIT_PCT"]:
+                "DAILY_LOSS_LIMIT_PCT", "MIN_VOLUME", "MIN_LIQUIDITY"]:
         m = re.search(rf'^{key}\s*=\s*([^\s#\n]+)', src, re.MULTILINE)
         if m:
             params[key] = m.group(1)
@@ -941,7 +941,8 @@ function dash(){
     golden:{MIN_EDGE_BUY_NO:'0.10',MIN_EDGE_BUY_YES:'0.03',KELLY_FRACTION:'0.15',
             MAX_BET_CENTS:'100',MAX_POSITIONS:'30',MAX_NO_PRICE_CENTS:'69',
             MAX_POSITION_PCT:'0.05',MAX_EDGE_CAP_YES:'0.08',MAX_EDGE_CAP_NO:'0.20',
-            MULTIGAME_MIN_EDGE_BUY_NO:'0.05',DAILY_LOSS_LIMIT_PCT:'0.03'},
+            MULTIGAME_MIN_EDGE_BUY_NO:'0.05',DAILY_LOSS_LIMIT_PCT:'0.03',
+            MIN_VOLUME:'10',MIN_LIQUIDITY:'5'},
 
     get lastActText(){
       if(!this.trades||!this.trades.length) return '';

@@ -277,8 +277,8 @@ EARLY_EXIT_NEAR_EXPIRY_HOURS = 2  # Force exit if <2h to expiry and in profit
 HARD_STOP_LOSS_PCT = -0.30   # Hard stop: exit if position is -30% or worse
 
 # ── Market scanning filters (2026-03-16 SELECTIVE) ──
-MIN_VOLUME = 0            # Allow all volumes — edge thresholds + thin-market cap (2 contracts) protect us
-MIN_LIQUIDITY = 0         # No hard exclusion on liquidity
+MIN_VOLUME = 10           # Hard-filter: no real fills possible on zero/near-zero volume markets
+MIN_LIQUIDITY = 5         # Require at least SOME open interest or volume to ensure real orderbook
 THIN_MARKET_VOLUME = 500          # below this = "thin" → AMM size-limited
 # Kalshi AMM reality: fills small orders always, but price moves with size
 # volume=0 → max 2 contracts at 50¢ (AMM impact ~1¢ per contract)
@@ -2646,12 +2646,9 @@ def filter_markets(markets: list) -> list:
             continue
         if max(m.open_interest, m.volume) < MIN_LIQUIDITY:
             continue
-        # RESTORED 2026-03-16: The user demands paper-mode to PERFECTLY reflect real money.
-        # 50c theoretical prices on 0 volume/0 OI markets are illusory. We cannot get filled at 50c in real life.
-        if m.yes_price == 50 and m.volume == 0 and m.open_interest == 0:
-            dte_check = m.days_to_expiry
-            if dte_check > 0.083:  # Skip only if more than 2 hours to expiry
-                continue
+        # Hard-filter: zero volume AND zero OI = ghost market, no real fills possible at ANY price
+        if m.volume == 0 and m.open_interest == 0:
+            continue
         dte = m.days_to_expiry
         if dte > MAX_DAYS_TO_EXPIRY or dte < MIN_DAYS_TO_EXPIRY:
             continue
