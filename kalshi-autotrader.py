@@ -3051,6 +3051,18 @@ def find_weather_opportunities() -> list:
 
 def check_circuit_breaker() -> tuple:
     """Check consecutive loss circuit breaker. Returns (is_paused, losses, message)."""
+
+    # FIX-2026-03-21: Manual reset checkpoint. If kalshi-circuit-reset.json exists,
+    # only count losses AFTER the reset timestamp. Used after strategy fixes.
+    reset_after_ts = None
+    _reset_file = Path(__file__).parent / "kalshi-circuit-reset.json"
+    try:
+        if _reset_file.exists():
+            _reset_data = json.loads(_reset_file.read_text())
+            reset_after_ts = _reset_data.get("reset_after")
+    except Exception:
+        pass
+
     try:
         if CIRCUIT_BREAKER_STATE_FILE.exists():
             with open(CIRCUIT_BREAKER_STATE_FILE) as f:
@@ -3066,7 +3078,7 @@ def check_circuit_breaker() -> tuple:
     except Exception:
         pass
 
-    # Count consecutive losses from trade log
+    # Count consecutive losses from trade log (only after reset_after_ts if set)
     losses = 0
     try:
         if TRADE_LOG_FILE.exists():
@@ -3075,6 +3087,11 @@ def check_circuit_breaker() -> tuple:
             for line in reversed(lines):
                 try:
                     entry = json.loads(line.strip())
+                    # If reset checkpoint is set, skip losses before the checkpoint
+                    if reset_after_ts:
+                        entry_ts = entry.get("timestamp", "")
+                        if entry_ts and entry_ts < reset_after_ts:
+                            break  # All prior losses are pre-fix, stop counting
                     status = entry.get("result_status", "pending")
                     if status == "won":
                         break

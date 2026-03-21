@@ -1,0 +1,5 @@
+{
+  "reset_after": "2026-03-21T21:15:53.594097+00:00",
+  "reason": "Strategy fix applied 2026-03-21: crypto-1h skip, MAX_YES_FOR_BUY_NO, sentiment fix, no Kelly boost",
+  "pre_fix_losses": 10
+}
