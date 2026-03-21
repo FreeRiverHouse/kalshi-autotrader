@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
 """
+⚠️ SAFETY RULE: NEVER TRADE WITH REAL MONEY ⚠️
+─────────────────────────────────────────────
+This bot is configured for PAPER TRADING ONLY by default.
+DO NOT enable --live mode unless:
+  1. Paper trading consistently wins for 100+ trades
+  2. You have verified the strategy profitability
+  3. You can afford to lose all funds
+
+Default: DRY_RUN = True (paper mode)
+
 Kalshi AutoTrader - Unified Edition
 Consolidation of v1 (crypto), v2 (infra+weather+momentum), v3 (LLM pipeline)
 
@@ -250,17 +260,17 @@ def get_calibration_factor(trade_history: list | None = None) -> float:
 MIN_EDGE = 0.03            # 3% global minimum edge (was 0 — allowed zero-edge data-collection trades)
 MAX_EDGE_CAP_YES = 0.08   # YES >8% edge = overconfidence (DATA: 10-15% edge = 32% WR, but 3-5% = 98% WR)
 MAX_EDGE_CAP_NO  = 0.20   # NO works great at high edge (DATA: 10-15% = 85.9% WR) — let it breathe
-MAX_POSITION_PCT = 0.05   # 5% per position (research: weather bot cap, survived longest)
-KELLY_FRACTION = 0.15      # Conservative sizing in paper mode
+MAX_POSITION_PCT = 0.05   # 5% per position — micro-betting with real money
+KELLY_FRACTION = 0.05      # Ultra-conservative Kelly for live micro-betting
 MIN_BET_CENTS = 5
-MAX_BET_CENTS = 100        # $1 max per trade — micro-betting on $100 bankroll
+MAX_BET_CENTS = 50         # 50¢ max per trade — micro-betting live
 MAX_POSITIONS = 30         # Max open positions (97.7% WR → low concurrent loss risk)
 
 
 def dynamic_max_positions(balance: float) -> int:
-    """PROC-002 Task 3.1: Scale max positions with balance. Min 5, max 20."""
+    """PROC-002 Task 3.1: Scale max positions with balance. Min 15, max 20."""
     if balance <= 50:
-        return 5
+        return 15
     elif balance <= 100:
         return int(5 + (balance - 50) * 0.2)  # 5-15
     elif balance <= 200:
@@ -271,6 +281,9 @@ def dynamic_max_positions(balance: float) -> int:
 # ── Risk/Reward filters (TRADE-003: fix loss 2x > win asymmetry) ──
 # BUY_NO at >50¢ means you risk more than you win. Require bigger edge to justify.
 MAX_NO_PRICE_CENTS = 69     # DATA: 50-69¢ = 84.7% WR +$8833, 70-84¢ = 73.8% WR -$2 (negative P&L despite high WR)
+MAX_YES_PRICE_FOR_BUY_NO = 65  # FIX-2026-03-21: Don't BUY_NO when market already says YES > 65¢.
+                                # When YES > 65¢, market is confident → our heuristic can't beat it.
+                                # Live data: ALL losses were BUY_NO when YES was 54-91¢.
 NO_PRICE_EDGE_SCALE = True  # Scale min edge up with BUY_NO price
 # If NO price is 50-65¢, require edge >= 3% + 0.1% per cent above 50
 # e.g., 55¢ → 3.5% min edge, 60¢ → 4% min edge, 65¢ → 4.5%
@@ -293,6 +306,7 @@ HARD_STOP_LOSS_PCT = -0.30   # Hard stop: exit if position is -30% or worse
 # vol=0 + OI=0 = ghost market. AMM default 50¢ = NO price discovery.
 # RULE: every market we touch MUST have been traded by at least 1 real person.
 MIN_VOLUME = 1            # At least 1 contract traded (was 0 — allowed ghost markets)
+PAPER_MIN_VOLUME_NON_CRYPTO = MIN_VOLUME  # Volume threshold for non-crypto in paper mode
 MIN_LIQUIDITY = 0         # OI=0 alone is OK if volume > 0 (someone traded, then closed)
 PAPER_SPREAD_CENTS = 3    # Spread sim on thin markets (~3¢ each side)
 THIN_MARKET_VOLUME = 500  # Below this = thin → apply spread + limit contracts
@@ -320,7 +334,7 @@ CATEGORY_BLACKLIST = {"economy", "finance"}
 # ── Circuit breaker / daily loss ──
 CIRCUIT_BREAKER_THRESHOLD = 5  # Pause after N consecutive losses
 CIRCUIT_BREAKER_COOLDOWN_HOURS = 4
-DAILY_LOSS_LIMIT_CENTS = 500   # $5 fallback — overridden by dynamic 3% of bankroll below
+DAILY_LOSS_LIMIT_CENTS = 2000  # $20 fallback — overridden by dynamic 3% of bankroll below
 DAILY_LOSS_LIMIT_PCT = 0.03    # 3% of bankroll = dynamic daily loss limit (research: Becker framework)
 
 # ── Weather markets (v2's T422) ──
@@ -982,7 +996,13 @@ def get_positions() -> list:
     result = kalshi_api("GET", "/trade-api/v2/portfolio/positions?limit=100&settlement_status=unsettled")
     if "error" in result:
         return []
-    return result.get("market_positions", [])
+    all_positions = result.get("market_positions", [])
+    # Filter out zombie positions (pos=0, total_traded=0) — API returns settled/empty entries
+    active = [p for p in all_positions if abs(p.get("position", 0)) > 0 or p.get("resting_contracts", 0) > 0]
+    if len(active) < len(all_positions):
+        zombie_count = len(all_positions) - len(active)
+        structured_log("positions_filter", {"total": len(all_positions), "active": len(active), "zombies": zombie_count})
+    return active
 
 
 def get_orderbook_imbalance(ticker: str) -> float:
@@ -2216,10 +2236,10 @@ def _heuristic_crypto(market: MarketInfo, context: dict = None) -> tuple:
     # Extreme fear (F&G < 20) gets EXTRA penalty since markets trend DOWN in fear
     fng = (context or {}).get("sentiment", {})
     sentiment_val = fng.get("value", 50)
-    sentiment_adj = (sentiment_val - 50) / 250  # -20% to +20% range (was /500 = -8%, way too weak)
-    # Extra bearish penalty in extreme fear — the market trends DOWN hard
+    sentiment_adj = (sentiment_val - 50) / 500  # FIX-2026-03-21: reduced from /250 (was too strong, caused systematic bias)
+    # Extra bearish penalty in extreme fear — but capped to avoid overriding the model
     if sentiment_val < 20:
-        extreme_fear_penalty = (20 - sentiment_val) / 100  # up to -20% extra at F&G=0
+        extreme_fear_penalty = (20 - sentiment_val) / 200  # halved: up to -10% extra (was /100 = -20%)
         sentiment_adj -= extreme_fear_penalty
     prob_above += sentiment_adj
 
@@ -2411,6 +2431,17 @@ def make_trade_decision(market: MarketInfo, forecast: ForecastResult, critic: Cr
                             price_cents=0, reason="GHOST: 50¢ AMM default + vol=0 — no price discovery",
                             forecast=forecast, critic=critic)
 
+    # FIX-2026-03-21: Skip crypto hourly markets (DTE < 2h) in LIVE mode.
+    # Live data: 10/10 losses on crypto hourly. Heuristic can't beat efficient 1h market.
+    # These markets resolve in <2h and the market price already reflects all info.
+    if not DRY_RUN:
+        _is_crypto_ticker = any(x in market.ticker.upper() for x in ("KXBTCD", "KXETHD", "KXSOLD"))
+        _dte_hours = market.days_to_expiry * 24
+        if _is_crypto_ticker and _dte_hours < 2.5:
+            return TradeDecision(action="SKIP", edge=0.0, kelly_size=0, contracts=0,
+                                price_cents=0, reason=f"CRYPTO-1H SKIP: {_dte_hours:.1f}h DTE — live 0W/10L on hourly crypto, market too efficient",
+                                forecast=forecast, critic=critic)
+
     # ── TAIL-END STRATEGY: near-certain outcomes close to resolution ──
     # Research (Becker): contracts at 97-99¢ have ~94% accuracy hours before resolution.
     # Buy NO at 1-3¢ when event is near-certain YES (or vice versa) for 1-3% safe return.
@@ -2587,6 +2618,14 @@ def make_trade_decision(market: MarketInfo, forecast: ForecastResult, critic: Cr
                             reason=f"BUY_NO price {side_price}¢ > {effective_max_no_price}¢ cap (bad risk/reward)",
                             forecast=forecast, critic=critic)
 
+    # 1b. FIX-2026-03-21: Block BUY_NO when market already says YES > threshold.
+    # When YES > 65¢, the market is confident the event WILL happen.
+    # Our heuristic cannot beat a confident market on 1h crypto — all live losses were here.
+    if action == "BUY_NO" and market.yes_price > MAX_YES_PRICE_FOR_BUY_NO:
+        return TradeDecision(action="SKIP", edge=edge, kelly_size=0, contracts=0, price_cents=side_price,
+                            reason=f"BUY_NO blocked: market YES={market.yes_price}¢ > {MAX_YES_PRICE_FOR_BUY_NO}¢ (market too confident)",
+                            forecast=forecast, critic=critic)
+
     # 2. Scaled edge requirement for expensive BUY_NO (re-enabled: data shows bad R/R at high prices)
     if action == "BUY_NO" and NO_PRICE_EDGE_SCALE and side_price > 50:
         scaled_min_edge = 0.07 + (side_price - 50) * 0.003  # 50¢→7%, 55¢→8.5%, 60¢→10%, 65¢→11.5%
@@ -2613,10 +2652,10 @@ def make_trade_decision(market: MarketInfo, forecast: ForecastResult, critic: Cr
     elif confidence == "high":
         kelly_frac *= 1.15  # Slight boost for high confidence (capped by MAX_POSITION_PCT later)
 
-    # ── CRYPTO category Kelly boost ×1.5 (Grok rec: 94.7% WR confirms massive edge) ──
+    # ── CRYPTO Kelly: NO boost until live WR proven. FIX-2026-03-21: removed 1.5× boost ──
+    # Previous 1.5× boost was based on paper WR but live results show 0W/10L.
+    # Revert to neutral (1×) until live track record is established.
     _is_crypto = any(x in ticker_up for x in ("BTC", "ETH", "KXBTC", "KXETH", "CRYPTO"))
-    if _is_crypto:
-        kelly_frac = min(kelly_frac * 1.5, 0.40)  # cap at 40% even for crypto
 
     # ── Streak-aware sizing: reduce bet progressively after consecutive losses ──
     # Uses cached streak count (computed once per cycle, not per market)
@@ -2712,15 +2751,31 @@ def parse_market(raw: dict) -> Optional[MarketInfo]:
         title = raw.get("title", "") or raw.get("event_title", "")
         subtitle = raw.get("subtitle", "") or raw.get("yes_sub_title", "")
         category = raw.get("category", "") or raw.get("series_ticker", "")
-        yes_price = raw.get("yes_bid", 0) or raw.get("last_price", 50)
-        no_price = 100 - yes_price if yes_price else 50
-        yes_ask = raw.get("yes_ask") or yes_price
-        yes_bid = raw.get("yes_bid") or yes_price
-        volume = raw.get("volume", 0) or 0
-        oi = raw.get("open_interest", 0) or 0
+        # API v2: prices in dollars as strings, not cents! Convert to cents (0-100)
+        yes_bid_dollars = raw.get("yes_bid_dollars") or raw.get("last_price_dollars") or "0.50"
+        yes_ask_dollars = raw.get("yes_ask_dollars") or yes_bid_dollars
+        try:
+            yes_price = int(float(yes_bid_dollars) * 100)
+        except (ValueError, TypeError):
+            yes_price = 50
+        try:
+            yes_ask = int(float(yes_ask_dollars) * 100)
+        except (ValueError, TypeError):
+            yes_ask = yes_price
+        no_price = 100 - yes_price
+        # API v2: volume/open_interest renamed to *_fp (float string)
+        try:
+            volume = int(float(raw.get("volume_fp", "0") or 0))
+        except (ValueError, TypeError):
+            volume = 0
+        try:
+            oi = int(float(raw.get("open_interest_fp", "0") or 0))
+        except (ValueError, TypeError):
+            oi = 0
         expiry = raw.get("close_time", "") or raw.get("expiration_time", "")
         status = raw.get("status", "")
         result = raw.get("result", "") or ""
+        yes_bid = yes_price  # Store in cents for consistency
         last_price = raw.get("last_price", 0) or 0
         return MarketInfo(ticker=ticker, title=title, subtitle=subtitle, category=category,
                          yes_price=yes_price, no_price=no_price, volume=volume, open_interest=oi,
@@ -2780,7 +2835,7 @@ def filter_markets(markets: list) -> list:
         filtered.append(m)
     # Log filter breakdown for debugging
     s = _filter_stats
-    print(f"   Filter breakdown: {s['total']} total → {s['non_crypto_vol']} killed by vol<{PAPER_MIN_VOLUME_NON_CRYPTO} (non-crypto), "
+    print(f"   Filter breakdown: {s['total']} total → {s['non_crypto_vol']} killed by vol<{MIN_VOLUME} (non-crypto), "
           f"{s['ghost_crypto']} ghost crypto, {s['dte']} DTE, {s['price']} price, {s['result']} settled")
     print(f"   Survivors: {s['crypto_pass']} crypto + {s['noncrypto_pass']} non-crypto = {len(filtered)}")
     # One-time: show top non-crypto by volume that were filtered
@@ -4239,6 +4294,11 @@ Examples:
         KELLY_FRACTION = args.kelly
     if args.live:
         DRY_RUN = False
+        # Live mode: use separate files so paper stats stay untouched
+        PAPER_STATE_FILE = _DATA_DIR / "live-trade-state.json"
+        TRADE_LOG_FILE   = _DATA_DIR / "kalshi-live-trades.jsonl"
+        print(f"📊 Live state file: {PAPER_STATE_FILE}")
+        print(f"📊 Live trade log:  {TRADE_LOG_FILE}")
 
     dry_run = not args.live
 
